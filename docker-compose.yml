@@ -1,0 +1,27 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: hood-backend
+    env_file:
+      - backend/.env
+    restart: unless-stopped
+    volumes:
+      - ./backend/data/sheets:/app/backend/data/sheets
+      - "C:\\Users\\Aidar\\Desktop\\JSON:/external/JSON"
+      - "C:\\Users\\Aidar\\Desktop\\HTML:/external/HTML"
+      - ./backend/logs:/app/backend/logs
+    expose:
+      - "8000"
+
+  nginx:
+    build:
+      context: .
+      dockerfile: deploy/nginx/Dockerfile
+    container_name: hood-nginx
+    depends_on:
+      - backend
+    restart: unless-stopped
+    ports:
+      - "80:80"

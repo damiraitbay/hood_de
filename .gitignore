@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Backend local config/secrets
+backend/.env
+
+# Runtime data/logs
+backend/logs/
+backend/data/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
