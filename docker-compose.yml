@@ -8,10 +8,10 @@ services:
       - backend/.env
     restart: unless-stopped
     volumes:
-      - ./backend/data/sheets:/app/backend/data/sheets
-      - "C:\\Users\\Aidar\\Desktop\\JSON:/external/JSON"
-      - "C:\\Users\\Aidar\\Desktop\\HTML:/external/HTML"
-      - ./backend/logs:/app/backend/logs
+      - /opt/hood-data/sheets:/app/backend/data/sheets
+      - /var/lib/productbaseapi/data/JV/JV_LISTER/JV_NEW/JSON:/external/JSON
+      - /var/lib/productbaseapi/data/JV/JV_PRODUCT/JV_NEW/HTML:/external/HTML
+      - ./backend/logs:/app/backend/logs    
     expose:
       - "8000"
 
@@ -24,4 +24,8 @@ services:
       - backend
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./deploy/nginx/certs:/etc/nginx/certs:ro
+      - /var/www/certbot:/var/www/certbot
+

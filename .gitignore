@@ -18,3 +18,6 @@ frontend/dist/
 Thumbs.db
 .idea/
 .vscode/
+
+# TLS certs
+deploy/nginx/certs/
