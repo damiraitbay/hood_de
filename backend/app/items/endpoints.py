@@ -6,7 +6,13 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
-from app.config import settings
+from app.config import (
+    get_html_folder_for_account,
+    get_json_folder_for_account,
+    get_price_sheet_for_account,
+    normalize_account_name,
+    settings,
+)
 from app.logger import get_logger
 from hood_api.config import ApiConfig
 from hood_api.client import send_request
@@ -34,8 +40,15 @@ from app.items.utils import normalize_item
 router = APIRouter()
 logger = get_logger("items")
 
-# Файл, куда будем складывать товары, не загрузившиеся в Hood
+# Р¤Р°Р№Р», РєСѓРґР° Р±СѓРґРµРј СЃРєР»Р°РґС‹РІР°С‚СЊ С‚РѕРІР°СЂС‹, РЅРµ Р·Р°РіСЂСѓР·РёРІС€РёРµСЃСЏ РІ Hood
 FAILED_ITEMS_PATH = Path(settings.LOG_FOLDER).resolve() / "failed_items.json"
+
+
+def _account_mode(account: str | None) -> str | None:
+    try:
+        return normalize_account_name(account)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _load_all_hood_items(cfg: ApiConfig, item_status: str = "running", group_size: int = 500) -> List[Dict[str, Any]]:
@@ -79,10 +92,10 @@ def _load_all_hood_items(cfg: ApiConfig, item_status: str = "running", group_siz
     return items
 
 
-def _resolve_description_for_api(norm: Dict[str, Any]) -> str:
+def _resolve_description_for_api(norm: Dict[str, Any], html_folder: str | None = None) -> str:
     """
-    Для API отправляем HTML-описание по EAN, если найден файл <EAN>.html/.htm.
-    Если файла нет или чтение не удалось, отправляем обычный description.
+    Р”Р»СЏ API РѕС‚РїСЂР°РІР»СЏРµРј HTML-РѕРїРёСЃР°РЅРёРµ РїРѕ EAN, РµСЃР»Рё РЅР°Р№РґРµРЅ С„Р°Р№Р» <EAN>.html/.htm.
+    Р•СЃР»Рё С„Р°Р№Р»Р° РЅРµС‚ РёР»Рё С‡С‚РµРЅРёРµ РЅРµ СѓРґР°Р»РѕСЃСЊ, РѕС‚РїСЂР°РІР»СЏРµРј РѕР±С‹С‡РЅС‹Р№ description.
     """
     fallback = str(norm.get("description") or "")
     reference_id = str(norm.get("reference_id") or "")
@@ -97,8 +110,8 @@ def _resolve_description_for_api(norm: Dict[str, Any]) -> str:
         return fallback
 
     candidate_dirs = []
-    if settings.HTML_DESCRIPTIONS_FOLDER.strip():
-        candidate_dirs.append(Path(settings.HTML_DESCRIPTIONS_FOLDER))
+    if (html_folder or "").strip():
+        candidate_dirs.append(Path(html_folder))
     if not candidate_dirs:
         logger.info(
             "HTML description source: fallback description (reason=html_path_not_configured, reference_id=%s, ean=%s)",
@@ -143,13 +156,20 @@ def items_from_json(
     limit: int = Query(20, ge=1, le=200),
     normalized: bool = False,
     source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
     """
-    Вывод товаров из наших локальных JSON (с пагинацией).
-    По умолчанию возвращает сырые записи, если normalized=true — возвращает normalize_item().
+    Р’С‹РІРѕРґ С‚РѕРІР°СЂРѕРІ РёР· РЅР°С€РёС… Р»РѕРєР°Р»СЊРЅС‹С… JSON (СЃ РїР°РіРёРЅР°С†РёРµР№).
+    РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РІРѕР·РІСЂР°С‰Р°РµС‚ СЃС‹СЂС‹Рµ Р·Р°РїРёСЃРё, РµСЃР»Рё normalized=true вЂ” РІРѕР·РІСЂР°С‰Р°РµС‚ normalize_item().
     """
+    account_mode = _account_mode(account)
+    json_folder = get_json_folder_for_account(account_mode)
     try:
-        all_items = load_items_from_source_file(source_file) if source_file else load_all_items()
+        all_items = (
+            load_items_from_source_file(source_file, json_folder=json_folder)
+            if source_file
+            else load_all_items(json_folder=json_folder)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
@@ -163,27 +183,31 @@ def items_from_json(
         "offset": offset,
         "limit": limit,
         "source_file": source_file,
+        "account": account_mode,
         "items": items,
     }
 
 
 @router.get("/json/files")
-def json_files() -> Dict[str, Any]:
+def json_files(account: str | None = Query(default=None)) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    json_folder = get_json_folder_for_account(account_mode)
     try:
-        files = list_json_source_files()
+        files = list_json_source_files(json_folder=json_folder)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return {"files": files}
+    return {"account": account_mode, "files": files}
 
 
 @router.get("/lookup/{reference_id}")
-def lookup_in_hood(reference_id: str) -> Dict[str, Any]:
+def lookup_in_hood(reference_id: str, account: str | None = Query(default=None)) -> Dict[str, Any]:
     """
     ???? ????? ? Hood ?? referenceID (????????, ART84153326) ? ?????????? itemID ? ?????? ????.
     """
-    cfg = ApiConfig.from_env()
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
     xml_body = build_item_list(
         item_status="running",
         start_at=1,
@@ -202,21 +226,32 @@ def lookup_in_hood(reference_id: str) -> Dict[str, Any]:
     found = [it for it in items if it.get("referenceID") == reference_id]
     if not found:
         raise HTTPException(status_code=404, detail="Item with this reference_id not found in Hood")
-    # если несколько — вернём все, но чаще всего будет один
-    return {"reference_id": reference_id, "items": found}
+    # РµСЃР»Рё РЅРµСЃРєРѕР»СЊРєРѕ вЂ” РІРµСЂРЅС‘Рј РІСЃРµ, РЅРѕ С‡Р°С‰Рµ РІСЃРµРіРѕ Р±СѓРґРµС‚ РѕРґРёРЅ
+    return {"reference_id": reference_id, "account": account_mode, "items": found}
 
 
-def _find_raw_item_by_id(item_id: str, source_file: str | None = None) -> Dict[str, Any] | None:
-    source_items = load_items_from_source_file(source_file) if source_file else load_all_items()
+def _find_raw_item_by_id(
+    item_id: str,
+    source_file: str | None = None,
+    json_folder: str | None = None,
+) -> Dict[str, Any] | None:
+    source_items = (
+        load_items_from_source_file(source_file, json_folder=json_folder)
+        if source_file
+        else load_all_items(json_folder=json_folder)
+    )
     for it in source_items:
         if str(it.get("ID", "")) == str(item_id):
             return it
     return None
 
 
-def _upload_one_by_id(item_id: str, source_file: str | None = None) -> Dict[str, Any]:
+def _upload_one_by_id(item_id: str, source_file: str | None = None, account: str | None = None) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
     try:
-        raw = _find_raw_item_by_id(item_id, source_file=source_file)
+        raw = _find_raw_item_by_id(item_id, source_file=source_file, json_folder=json_folder)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
@@ -224,9 +259,9 @@ def _upload_one_by_id(item_id: str, source_file: str | None = None) -> Dict[str,
     if not raw:
         raise HTTPException(status_code=404, detail="Item not found in JSON by ID")
 
-    cfg = ApiConfig.from_env()
+    cfg = ApiConfig.from_env(account=account_mode)
     norm = normalize_item(raw)
-    api_description = _resolve_description_for_api(norm)
+    api_description = _resolve_description_for_api(norm, html_folder=html_folder)
 
     xml_body = build_item_insert(
         reference_id=norm["reference_id"],
@@ -254,6 +289,7 @@ def _upload_one_by_id(item_id: str, source_file: str | None = None) -> Dict[str,
     resp = parse_item_insert_response(response_xml)
     resp["reference_id"] = norm["reference_id"]
     resp["item_id_local"] = str(item_id)
+    resp["account"] = account_mode
 
     msg = (resp.get("item_message") or "") + " " + " ".join(resp.get("errors") or [])
     if "Sie haben bereits einen identischen Artikel" in msg:
@@ -263,21 +299,28 @@ def _upload_one_by_id(item_id: str, source_file: str | None = None) -> Dict[str,
 
 
 @router.post("/validate_one/{item_id}")
-def validate_one(item_id: str, source_file: str | None = Query(default=None)) -> Dict[str, Any]:
+def validate_one(
+    item_id: str,
+    source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
     """
-    Проверка структуры одного товара по ID из JSON.
+    РџСЂРѕРІРµСЂРєР° СЃС‚СЂСѓРєС‚СѓСЂС‹ РѕРґРЅРѕРіРѕ С‚РѕРІР°СЂР° РїРѕ ID РёР· JSON.
     """
+    account_mode = _account_mode(account)
+    json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
     try:
-        raw = _find_raw_item_by_id(item_id, source_file=source_file)
+        raw = _find_raw_item_by_id(item_id, source_file=source_file, json_folder=json_folder)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"JSON file not found: {source_file}")
     if not raw:
         raise HTTPException(status_code=404, detail="Item not found in JSON by ID")
-    cfg = ApiConfig.from_env()
+    cfg = ApiConfig.from_env(account=account_mode)
     norm = normalize_item(raw)
-    api_description = _resolve_description_for_api(norm)
+    api_description = _resolve_description_for_api(norm, html_folder=html_folder)
     xml_body = build_item_validate(
         reference_id=norm["reference_id"],
         title=norm["item_name"],
@@ -303,22 +346,28 @@ def validate_one(item_id: str, source_file: str | None = Query(default=None)) ->
     resp = parse_item_insert_response(response_xml)
     resp["reference_id"] = norm["reference_id"]
     resp["item_id_local"] = item_id
+    resp["account"] = account_mode
     return resp
 
 
 @router.post("/upload_one/{item_id}")
-def upload_one(item_id: str, source_file: str | None = Query(default=None)) -> Dict[str, Any]:
+def upload_one(
+    item_id: str,
+    source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
     """
-    Отправка одного товара по ID из JSON.
-    Если Hood вернул 'Sie haben bereits einen identischen Artikel' — считаем успехом и удаляем из JSON.
+    РћС‚РїСЂР°РІРєР° РѕРґРЅРѕРіРѕ С‚РѕРІР°СЂР° РїРѕ ID РёР· JSON.
+    Р•СЃР»Рё Hood РІРµСЂРЅСѓР» 'Sie haben bereits einen identischen Artikel' вЂ” СЃС‡РёС‚Р°РµРј СѓСЃРїРµС…РѕРј Рё СѓРґР°Р»СЏРµРј РёР· JSON.
     """
-    return _upload_one_by_id(item_id=item_id, source_file=source_file)
+    return _upload_one_by_id(item_id=item_id, source_file=source_file, account=account)
 
 
 @router.post("/upload_one")
 def upload_many(
     item_ids: List[str] = Body(..., embed=True),
     source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
 ) -> List[Dict[str, Any]]:
     normalized_ids: List[str] = []
     seen: set[str] = set()
@@ -335,7 +384,7 @@ def upload_many(
     results: List[Dict[str, Any]] = []
     for item_id in normalized_ids:
         try:
-            resp = _upload_one_by_id(item_id=item_id, source_file=source_file)
+            resp = _upload_one_by_id(item_id=item_id, source_file=source_file, account=account)
         except HTTPException as exc:
             results.append(
                 {
@@ -354,8 +403,8 @@ def upload_many(
 @router.get("/status")
 def items_status() -> Dict[str, Any]:
     """
-    Список товаров, которые НЕ удалось загрузить в Hood при последнем /items/upload.
-    Читаем их из failed_items.json.
+    РЎРїРёСЃРѕРє С‚РѕРІР°СЂРѕРІ, РєРѕС‚РѕСЂС‹Рµ РќР• СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РІ Hood РїСЂРё РїРѕСЃР»РµРґРЅРµРј /items/upload.
+    Р§РёС‚Р°РµРј РёС… РёР· failed_items.json.
     """
     if not FAILED_ITEMS_PATH.exists():
         return {"failed_items": []}
@@ -363,26 +412,29 @@ def items_status() -> Dict[str, Any]:
     try:
         data = json.loads(FAILED_ITEMS_PATH.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Не удалось прочитать failed_items.json: {exc}")
+        raise HTTPException(status_code=500, detail=f"РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ failed_items.json: {exc}")
 
-    # Ожидается список нормализованных товаров
+    # РћР¶РёРґР°РµС‚СЃСЏ СЃРїРёСЃРѕРє РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅС‹С… С‚РѕРІР°СЂРѕРІ
     if not isinstance(data, list):
         data = []
     return {"failed_items": data}
 
 
 @router.post("/validate")
-def items_validate() -> List[Dict[str, Any]]:
+def items_validate(account: str | None = Query(default=None)) -> List[Dict[str, Any]]:
     """
-    Проверка структуры товаров: itemValidate для всех товаров сервера.
+    РџСЂРѕРІРµСЂРєР° СЃС‚СЂСѓРєС‚СѓСЂС‹ С‚РѕРІР°СЂРѕРІ: itemValidate РґР»СЏ РІСЃРµС… С‚РѕРІР°СЂРѕРІ СЃРµСЂРІРµСЂР°.
     """
-    cfg = ApiConfig.from_env()
-    server_items = load_all_items()
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
+    server_items = load_all_items(json_folder=json_folder)
 
     results: List[Dict[str, Any]] = []
     for raw in server_items:
         norm = normalize_item(raw)
-        api_description = _resolve_description_for_api(norm)
+        api_description = _resolve_description_for_api(norm, html_folder=html_folder)
         xml_body = build_item_validate(
             reference_id=norm["reference_id"],
             title=norm["item_name"],
@@ -413,6 +465,7 @@ def items_validate() -> List[Dict[str, Any]]:
             continue
         resp = parse_item_insert_response(response_xml)
         resp["reference_id"] = norm["reference_id"]
+        resp["account"] = account_mode
         results.append(resp)
     return results
 
@@ -421,22 +474,30 @@ def items_validate() -> List[Dict[str, Any]]:
 async def items_upload(
     limit: int = 1,
     source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
 ) -> List[Dict[str, Any]]:
     """
-    Асинхронная загрузка ВСЕХ товаров из JSON в Hood.
-    Если при загрузке товара произошла ошибка, сохраняем его в failed_items.json.
+    РђСЃРёРЅС…СЂРѕРЅРЅР°СЏ Р·Р°РіСЂСѓР·РєР° Р’РЎР•РҐ С‚РѕРІР°СЂРѕРІ РёР· JSON РІ Hood.
+    Р•СЃР»Рё РїСЂРё Р·Р°РіСЂСѓР·РєРµ С‚РѕРІР°СЂР° РїСЂРѕРёР·РѕС€Р»Р° РѕС€РёР±РєР°, СЃРѕС…СЂР°РЅСЏРµРј РµРіРѕ РІ failed_items.json.
     """
-    cfg = ApiConfig.from_env()
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
     try:
-        server_items = load_items_from_source_file(source_file) if source_file else load_all_items()
+        server_items = (
+            load_items_from_source_file(source_file, json_folder=json_folder)
+            if source_file
+            else load_all_items(json_folder=json_folder)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"JSON file not found: {source_file}")
     all_norms: List[Dict[str, Any]] = [normalize_item(raw) for raw in server_items]
 
-    # Пока по умолчанию грузим только первый товар (limit=1).
-    # Для массовой загрузки можно будет просто вызвать /items/upload?limit=1000.
+    # РџРѕРєР° РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РіСЂСѓР·РёРј С‚РѕР»СЊРєРѕ РїРµСЂРІС‹Р№ С‚РѕРІР°СЂ (limit=1).
+    # Р”Р»СЏ РјР°СЃСЃРѕРІРѕР№ Р·Р°РіСЂСѓР·РєРё РјРѕР¶РЅРѕ Р±СѓРґРµС‚ РїСЂРѕСЃС‚Рѕ РІС‹Р·РІР°С‚СЊ /items/upload?limit=1000.
     if limit <= 0:
         to_upload: List[Dict[str, Any]] = all_norms
         logger.info(f"Start upload {len(to_upload)} items to Hood (all items)")
@@ -452,7 +513,7 @@ async def items_upload(
     async def worker(norm: Dict[str, Any]) -> None:
         nonlocal processed_count
         async with semaphore:
-            api_description = _resolve_description_for_api(norm)
+            api_description = _resolve_description_for_api(norm, html_folder=html_folder)
             xml_body = build_item_insert(
                 reference_id=norm["reference_id"],
                 title=norm["item_name"],
@@ -475,43 +536,45 @@ async def items_upload(
                 response_xml = await asyncio.to_thread(send_request, xml_body, cfg)
                 resp = parse_item_insert_response(response_xml)
                 resp["reference_id"] = norm["reference_id"]
+                resp["account"] = account_mode
 
-                # Специальный случай: товар уже существует в Hood
+                # РЎРїРµС†РёР°Р»СЊРЅС‹Р№ СЃР»СѓС‡Р°Р№: С‚РѕРІР°СЂ СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓРµС‚ РІ Hood
                 msg = (resp.get("item_message") or "") + " " + " ".join(resp.get("errors") or [])
                 if "Sie haben bereits einen identischen Artikel" in msg:
                     logger.info(
-                        f"≡ {norm['reference_id']} уже есть в Hood (identischer Artikel); "
-                        f"itemID={resp.get('item_id', '?')} — удаляем из локального JSON"
+                        f"в‰Ў {norm['reference_id']} СѓР¶Рµ РµСЃС‚СЊ РІ Hood (identischer Artikel); "
+                        f"itemID={resp.get('item_id', '?')} вЂ” СѓРґР°Р»СЏРµРј РёР· Р»РѕРєР°Р»СЊРЅРѕРіРѕ JSON"
                     )
-                    # Считаем как успех и удаляем из исходного JSON
+                    # РЎС‡РёС‚Р°РµРј РєР°Рє СѓСЃРїРµС… Рё СѓРґР°Р»СЏРµРј РёР· РёСЃС…РѕРґРЅРѕРіРѕ JSON
                     resp["success"] = True
                 elif resp.get("success"):
                     logger.info(
-                        f"✓ {norm['reference_id']} загружен успешно; "
+                        f"вњ“ {norm['reference_id']} Р·Р°РіСЂСѓР¶РµРЅ СѓСЃРїРµС€РЅРѕ; "
                         f"itemID={resp.get('item_id', '?')}"
                     )
                 else:
-                    logger.warning(f"✗ {norm['reference_id']} не загружен: {resp.get('item_message', 'unknown error')}")
+                    logger.warning(f"вњ— {norm['reference_id']} РЅРµ Р·Р°РіСЂСѓР¶РµРЅ: {resp.get('item_message', 'unknown error')}")
             except Exception as exc:
                 resp = {
                     "reference_id": norm["reference_id"],
+                    "account": account_mode,
                     "success": False,
                     "error": str(exc),
                 }
-                logger.error(f"✗ Ошибка загрузки товара {norm['reference_id']}: {exc}")
+                logger.error(f"вњ— РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё С‚РѕРІР°СЂР° {norm['reference_id']}: {exc}")
 
             results.append(resp)
             processed_count += 1
             
-            # Логируем прогресс каждые 10 товаров или на каждом 10-м, 20-м, 30-м и т.д.
+            # Р›РѕРіРёСЂСѓРµРј РїСЂРѕРіСЂРµСЃСЃ РєР°Р¶РґС‹Рµ 10 С‚РѕРІР°СЂРѕРІ РёР»Рё РЅР° РєР°Р¶РґРѕРј 10-Рј, 20-Рј, 30-Рј Рё С‚.Рґ.
             if processed_count % 10 == 0 or processed_count == total_count:
-                logger.info(f"Прогресс: {processed_count}/{total_count} товаров обработано ({processed_count * 100 // total_count}%)")
+                logger.info(f"РџСЂРѕРіСЂРµСЃСЃ: {processed_count}/{total_count} С‚РѕРІР°СЂРѕРІ РѕР±СЂР°Р±РѕС‚Р°РЅРѕ ({processed_count * 100 // total_count}%)")
 
     tasks = [worker(it) for it in to_upload]
     if tasks:
         await asyncio.gather(*tasks)
 
-    # Собираем все товары, которые не удалось загрузить, и сохраняем
+    # РЎРѕР±РёСЂР°РµРј РІСЃРµ С‚РѕРІР°СЂС‹, РєРѕС‚РѕСЂС‹Рµ РЅРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ, Рё СЃРѕС…СЂР°РЅСЏРµРј
     # ?????? ? ??????? ?????? Hood (status, errors, item_message, reference_id ? ?.?.)
     failed_items: List[Dict[str, Any]] = [r for r in results if not r.get("success")]
 
@@ -519,16 +582,17 @@ async def items_upload(
     FAILED_ITEMS_PATH.write_text(json.dumps(failed_items, ensure_ascii=False, indent=2), encoding="utf-8")
 
     logger.info(
-        f"Загрузка завершена. Успешно: {len(results) - len(failed_items)}, "
-        f"с ошибками: {len(failed_items)}. Файл с ошибочными товарами: {FAILED_ITEMS_PATH}"
+        f"Р—Р°РіСЂСѓР·РєР° Р·Р°РІРµСЂС€РµРЅР°. РЈСЃРїРµС€РЅРѕ: {len(results) - len(failed_items)}, "
+        f"СЃ РѕС€РёР±РєР°РјРё: {len(failed_items)}. Р¤Р°Р№Р» СЃ РѕС€РёР±РѕС‡РЅС‹РјРё С‚РѕРІР°СЂР°РјРё: {FAILED_ITEMS_PATH}"
     )
 
     return results
 
 
 @router.delete("/delete/by-item-number/{item_number}")
-def delete_item_by_item_number(item_number: str) -> Dict[str, Any]:
-    cfg = ApiConfig.from_env()
+def delete_item_by_item_number(item_number: str, account: str | None = Query(default=None)) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
     xml_delete = build_item_delete(items=[{"itemNumber": item_number}], config=cfg)
     try:
         delete_resp_xml = send_request(xml_delete, config=cfg)
@@ -536,11 +600,15 @@ def delete_item_by_item_number(item_number: str) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc))
     resp = parse_item_delete_response(delete_resp_xml)
     resp["item_number"] = item_number
+    resp["account"] = account_mode
     return resp
 
 
 @router.post("/delete/by-item-number")
-def delete_items_by_item_number(item_numbers: List[str] = Body(..., embed=True)) -> Dict[str, Any]:
+def delete_items_by_item_number(
+    item_numbers: List[str] = Body(..., embed=True),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
     normalized: List[str] = []
     seen: set[str] = set()
     for raw in item_numbers:
@@ -553,7 +621,8 @@ def delete_items_by_item_number(item_numbers: List[str] = Body(..., embed=True))
     if not normalized:
         raise HTTPException(status_code=400, detail="item_numbers is empty")
 
-    cfg = ApiConfig.from_env()
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
     xml_delete = build_item_delete(
         items=[{"itemNumber": item_number} for item_number in normalized],
         config=cfg,
@@ -566,6 +635,7 @@ def delete_items_by_item_number(item_numbers: List[str] = Body(..., embed=True))
     resp = parse_item_delete_response(delete_resp_xml)
     resp["item_numbers"] = normalized
     resp["requested"] = len(normalized)
+    resp["account"] = account_mode
     return resp
 
 
@@ -573,8 +643,10 @@ def delete_items_by_item_number(item_numbers: List[str] = Body(..., embed=True))
 def delete_all_items_from_hood(
     item_status: str = Query(default="running"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
+    account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
-    cfg = ApiConfig.from_env()
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
     hood_items = _load_all_hood_items(cfg=cfg, item_status=item_status, group_size=500)
     logger.info(
         "Delete all start: item_status=%s, found_in_item_list=%s, delete_batch_size=%s",
@@ -606,6 +678,7 @@ def delete_all_items_from_hood(
         return {
             "success": True,
             "item_status": item_status,
+            "account": account_mode,
             "found_in_item_list": len(hood_items),
             "missing_item_id": missing_item_id,
             "requested": 0,
@@ -696,6 +769,7 @@ def delete_all_items_from_hood(
     return {
         "success": failed == 0,
         "item_status": item_status,
+        "account": account_mode,
         "found_in_item_list": len(hood_items),
         "missing_item_id": missing_item_id,
         "requested": len(item_ids),
@@ -706,16 +780,19 @@ def delete_all_items_from_hood(
 
 
 @router.post("/update_prices")
-def update_prices() -> Dict[str, Any]:
+def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
     """
-    Массовое обновление цен по EAN из CSV (PRICE_SHEET_PATH).
-    Для всех товаров сервера ищем EAN в прайс‑листе и вызываем itemUpdate по itemID.
+    РњР°СЃСЃРѕРІРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ С†РµРЅ РїРѕ EAN РёР· CSV (PRICE_SHEET_PATH).
+    Р”Р»СЏ РІСЃРµС… С‚РѕРІР°СЂРѕРІ СЃРµСЂРІРµСЂР° РёС‰РµРј EAN РІ РїСЂР°Р№СЃвЂ‘Р»РёСЃС‚Рµ Рё РІС‹Р·С‹РІР°РµРј itemUpdate РїРѕ itemID.
     """
-    cfg = ApiConfig.from_env()
-    prices = load_prices()  # EAN -> ????? ????
-    server_items = load_all_items()
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    price_sheet_path = get_price_sheet_for_account(account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+    prices = load_prices(price_sheet_path=price_sheet_path)  # EAN -> price
+    server_items = load_all_items(json_folder=json_folder)
 
-    # Получаем карту referenceID -> itemID из Hood
+    # РџРѕР»СѓС‡Р°РµРј РєР°СЂС‚Сѓ referenceID -> itemID РёР· Hood
     xml_body = build_item_list(
         item_status="running",
         start_at=1,
@@ -753,9 +830,9 @@ def update_prices() -> Dict[str, Any]:
         )
 
     if not updates:
-        return {"updated": 0, "details": [], "message": "Нет товаров для обновления цен"}
+        return {"updated": 0, "details": [], "message": "РќРµС‚ С‚РѕРІР°СЂРѕРІ РґР»СЏ РѕР±РЅРѕРІР»РµРЅРёСЏ С†РµРЅ"}
 
-    # itemUpdate принимает до 5 товаров за раз — бьём на чанки
+    # itemUpdate РїСЂРёРЅРёРјР°РµС‚ РґРѕ 5 С‚РѕРІР°СЂРѕРІ Р·Р° СЂР°Р· вЂ” Р±СЊС‘Рј РЅР° С‡Р°РЅРєРё
     chunks = [updates[i : i + 5] for i in range(0, len(updates), 5)]
     all_responses: List[Dict[str, Any]] = []
 
@@ -780,3 +857,8 @@ def update_prices() -> Dict[str, Any]:
         "updated": len(updates),
         "details": all_responses,
     }
+
+
+
+
+

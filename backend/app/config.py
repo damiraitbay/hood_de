@@ -82,3 +82,49 @@ class Settings:
 
 
 settings = Settings()
+
+
+def normalize_account_name(account: str | None) -> str | None:
+    mode = (account or "").strip().lower()
+    if not mode:
+        return None
+    if mode in ("xlmoebel", "xl"):
+        return "xlmoebel"
+    if mode in ("jvmoebel", "jv"):
+        return "jvmoebel"
+    raise ValueError("account must be one of: xlmoebel, jvmoebel")
+
+
+def get_json_folder_for_account(account: str | None) -> str:
+    mode = normalize_account_name(account)
+    if mode == "xlmoebel":
+        return _resolve_path(
+            os.getenv("JSON_FOLDER_XL", "/var/lib/productbaseapi/data/XL/XL_LISTER/XL_NEW/JSON")
+        )
+    if mode == "jvmoebel":
+        return _resolve_path(
+            os.getenv("JSON_FOLDER_JV", "/var/lib/productbaseapi/data/JV/JV_LISTER/JV_NEW/JSON")
+        )
+    return settings.JSON_FOLDER
+
+
+def get_html_folder_for_account(account: str | None) -> str:
+    mode = normalize_account_name(account)
+    if mode == "xlmoebel":
+        return _resolve_path(
+            os.getenv("HTML_DESCRIPTIONS_FOLDER_XL", "/var/lib/productbaseapi/data/XL/XL_PRODUCT/XL_NEW/HTML")
+        )
+    if mode == "jvmoebel":
+        return _resolve_path(
+            os.getenv("HTML_DESCRIPTIONS_FOLDER_JV", "/var/lib/productbaseapi/data/JV/JV_PRODUCT/JV_NEW/HTML")
+        )
+    return settings.HTML_DESCRIPTIONS_FOLDER
+
+
+def get_price_sheet_for_account(account: str | None) -> str:
+    mode = normalize_account_name(account)
+    if mode == "xlmoebel":
+        return _resolve_path(os.getenv("PRICE_SHEET_PATH_XL", ""), allow_empty=True)
+    if mode == "jvmoebel":
+        return _resolve_path(os.getenv("PRICE_SHEET_PATH_JV", ""), allow_empty=True)
+    return settings.PRICE_SHEET_PATH

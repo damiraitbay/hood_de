@@ -27,8 +27,8 @@ def _load_items_from_file_path(file: Path) -> List[Dict[str, Any]]:
     return []
 
 
-def _get_json_folder() -> Path:
-    folder_raw = settings.JSON_FOLDER.strip()
+def _get_json_folder(json_folder: str | None = None) -> Path:
+    folder_raw = (json_folder or settings.JSON_FOLDER).strip()
     if not folder_raw:
         raise ValueError("JSON_FOLDER is not configured")
     folder = Path(folder_raw)
@@ -37,7 +37,7 @@ def _get_json_folder() -> Path:
     return folder
 
 
-def resolve_source_file(source_file: str) -> Path:
+def resolve_source_file(source_file: str, json_folder: str | None = None) -> Path:
     """
     Returns a safe path to a JSON file inside JSON_FOLDER.
     Accepts only plain file names (no directories).
@@ -48,14 +48,14 @@ def resolve_source_file(source_file: str) -> Path:
     if not file_name.lower().endswith(".json"):
         raise ValueError("source_file must end with .json")
 
-    file = _get_json_folder() / file_name
+    file = _get_json_folder(json_folder=json_folder) / file_name
     if not file.exists() or not file.is_file():
         raise FileNotFoundError(file_name)
     return file
 
 
-def list_json_source_files() -> List[Dict[str, Any]]:
-    folder = _get_json_folder()
+def list_json_source_files(json_folder: str | None = None) -> List[Dict[str, Any]]:
+    folder = _get_json_folder(json_folder=json_folder)
     files = sorted(folder.glob("*.json"), reverse=True)
     result: List[Dict[str, Any]] = []
     for file in files:
@@ -68,17 +68,17 @@ def list_json_source_files() -> List[Dict[str, Any]]:
     return result
 
 
-def load_items_from_source_file(source_file: str) -> List[Dict[str, Any]]:
-    file = resolve_source_file(source_file)
+def load_items_from_source_file(source_file: str, json_folder: str | None = None) -> List[Dict[str, Any]]:
+    file = resolve_source_file(source_file, json_folder=json_folder)
     return _load_items_from_file_path(file)
 
 
-def load_all_items() -> List[Dict[str, Any]]:
+def load_all_items(json_folder: str | None = None) -> List[Dict[str, Any]]:
     """
     Loads all items from all JSON files in JSON_FOLDER.
     """
     items: List[Dict[str, Any]] = []
-    folder = _get_json_folder()
+    folder = _get_json_folder(json_folder=json_folder)
     files = sorted(folder.glob("*.json"), reverse=True)
     for file in files:
         items.extend(_load_items_from_file_path(file))

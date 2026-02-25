@@ -47,6 +47,7 @@ function summarizeData(data, label) {
 
 export default function App() {
   const [apiBase, setApiBase] = useState("/api");
+  const [accountMode, setAccountMode] = useState("jvmoebel");
   const [jsonFiles, setJsonFiles] = useState([]);
   const [sourceFile, setSourceFile] = useState("");
   const [jsonItems, setJsonItems] = useState([]);
@@ -110,10 +111,16 @@ export default function App() {
     setStatus({ type, title, text });
   }
 
-  function withSource(url) {
-    if (!sourceFile) return url;
+  function withAccount(url) {
     const separator = url.includes("?") ? "&" : "?";
-    return `${url}${separator}source_file=${encodeURIComponent(sourceFile)}`;
+    return `${url}${separator}account=${encodeURIComponent(accountMode)}`;
+  }
+
+  function withSource(url) {
+    const urlWithAccount = withAccount(url);
+    if (!sourceFile) return urlWithAccount;
+    const separator = urlWithAccount.includes("?") ? "&" : "?";
+    return `${urlWithAccount}${separator}source_file=${encodeURIComponent(sourceFile)}`;
   }
 
   async function call(method, url, label, payload = null) {
@@ -154,11 +161,12 @@ export default function App() {
     setRawOutput("");
     setUiStatus("loading", "Load JSON files", "Fetching source files...");
     try {
-      const res = await fetch(endpoints.jsonFiles);
+      const filesUrl = withAccount(endpoints.jsonFiles);
+      const res = await fetch(filesUrl);
       const text = await res.text();
       const data = parseResponseBody(text);
       const body = typeof data === "string" ? data : pretty(data);
-      setRawOutput([`GET ${endpoints.jsonFiles}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setRawOutput([`GET ${filesUrl}`, `HTTP ${res.status}`, "", body].join("\n"));
       setLastActionAt(Date.now());
 
       if (!res.ok) {
@@ -190,7 +198,7 @@ export default function App() {
   }
 
   async function checkConnection() {
-    const result = await call("GET", endpoints.docs, "Connection check");
+    const result = await call("GET", withAccount(endpoints.docs), "Connection check");
     setConnectionOk(result.ok);
     if (result.ok) {
       await loadJsonFiles();
@@ -279,12 +287,12 @@ export default function App() {
 
   async function uploadAllFromFolder() {
     if (!window.confirm("Upload all items from JSON folder (all files)?")) return;
-    const url = `${endpoints.upload}?limit=0`;
+    const url = withAccount(`${endpoints.upload}?limit=0`);
     await call("POST", url, "Upload all from JSON folder");
   }
 
   async function loadFailedItems() {
-    await call("GET", endpoints.status, "Failed items list");
+    await call("GET", withAccount(endpoints.status), "Failed items list");
   }
 
   async function deleteByItemNumber() {
@@ -298,14 +306,14 @@ export default function App() {
     }
 
     if (!window.confirm(`Delete ${itemNumbers.length} item(s) by itemNumber?`)) return;
-    await call("POST", endpoints.deleteByItemNumberBulk, `Delete (${itemNumbers.length})`, {
+    await call("POST", withAccount(endpoints.deleteByItemNumberBulk), `Delete (${itemNumbers.length})`, {
       item_numbers: itemNumbers,
     });
   }
 
   async function deleteAllInHood() {
     if (!window.confirm("Delete ALL items in Hood? This action cannot be undone.")) return;
-    await call("DELETE", endpoints.deleteAll, "Delete ALL items");
+    await call("DELETE", withAccount(endpoints.deleteAll), "Delete ALL items");
   }
 
   const statusClass = `status status-${status.type}`;
@@ -345,6 +353,24 @@ export default function App() {
         <details className="advanced">
           <summary>Connection settings</summary>
           <div className="row">
+            <label className="label">
+              Account
+              <select
+                className="input"
+                value={accountMode}
+                onChange={(e) => {
+                  setAccountMode(e.target.value);
+                  setJsonFiles([]);
+                  setSourceFile("");
+                  setJsonItems([]);
+                  setSelectedIds([]);
+                }}
+                disabled={loading}
+              >
+                <option value="jvmoebel">jvmoebel</option>
+                <option value="xlmoebel">xlmoebel</option>
+              </select>
+            </label>
             <label className="label grow">
               API URL
               <input

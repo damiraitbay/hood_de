@@ -7,8 +7,8 @@ from app.logger import get_logger
 logger = get_logger("prices")
 
 
-def load_prices():
-    sheet_path_raw = settings.PRICE_SHEET_PATH.strip()
+def load_prices(price_sheet_path: str | None = None):
+    sheet_path_raw = (price_sheet_path or settings.PRICE_SHEET_PATH).strip()
     if not sheet_path_raw:
         raise ValueError("PRICE_SHEET_PATH is not configured")
     sheet_path = Path(sheet_path_raw)
