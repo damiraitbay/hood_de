@@ -576,6 +576,12 @@ def delete_all_items_from_hood(
 ) -> Dict[str, Any]:
     cfg = ApiConfig.from_env()
     hood_items = _load_all_hood_items(cfg=cfg, item_status=item_status, group_size=500)
+    logger.info(
+        "Delete all start: item_status=%s, found_in_item_list=%s, delete_batch_size=%s",
+        item_status,
+        len(hood_items),
+        delete_batch_size,
+    )
 
     item_ids: List[str] = []
     seen: set[str] = set()
@@ -592,6 +598,11 @@ def delete_all_items_from_hood(
         item_ids.append(item_id)
 
     if not item_ids:
+        logger.info(
+            "Delete all done: item_status=%s, requested=0, deleted=0, failed=0, missing_item_id=%s",
+            item_status,
+            missing_item_id,
+        )
         return {
             "success": True,
             "item_status": item_status,
@@ -606,9 +617,11 @@ def delete_all_items_from_hood(
     responses: List[Dict[str, Any]] = []
     deleted = 0
     failed = 0
+    total_batches = (len(item_ids) + delete_batch_size - 1) // delete_batch_size
 
     for i in range(0, len(item_ids), delete_batch_size):
         chunk = item_ids[i : i + delete_batch_size]
+        batch_num = (i // delete_batch_size) + 1
         xml_delete = build_item_delete(
             items=[{"itemID": item_id} for item_id in chunk],
             config=cfg,
@@ -617,6 +630,13 @@ def delete_all_items_from_hood(
             delete_resp_xml = send_request(xml_delete, config=cfg)
         except Exception as exc:
             failed += len(chunk)
+            logger.error(
+                "Delete all batch failed: batch=%s/%s, requested=%s, error=%s",
+                batch_num,
+                total_batches,
+                len(chunk),
+                exc,
+            )
             responses.append(
                 {
                     "success": False,
@@ -637,11 +657,42 @@ def delete_all_items_from_hood(
             failed += batch_failed
             unresolved = max(len(chunk) - batch_deleted - batch_failed, 0)
             failed += unresolved
+            logger.info(
+                "Delete all batch done: batch=%s/%s, requested=%s, deleted=%s, failed=%s, unresolved=%s",
+                batch_num,
+                total_batches,
+                len(chunk),
+                batch_deleted,
+                batch_failed,
+                unresolved,
+            )
         elif resp.get("success"):
             deleted += len(chunk)
+            logger.info(
+                "Delete all batch done: batch=%s/%s, requested=%s, deleted=%s, failed=0",
+                batch_num,
+                total_batches,
+                len(chunk),
+                len(chunk),
+            )
         else:
             failed += len(chunk)
+            logger.warning(
+                "Delete all batch done: batch=%s/%s, requested=%s, deleted=0, failed=%s",
+                batch_num,
+                total_batches,
+                len(chunk),
+                len(chunk),
+            )
 
+    logger.info(
+        "Delete all done: item_status=%s, requested=%s, deleted=%s, failed=%s, missing_item_id=%s",
+        item_status,
+        len(item_ids),
+        deleted,
+        failed,
+        missing_item_id,
+    )
     return {
         "success": failed == 0,
         "item_status": item_status,
