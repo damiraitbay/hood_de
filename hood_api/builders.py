@@ -334,13 +334,17 @@ def build_item_status(item_id: str, detail_level: str = "image", config: ApiConf
 
 def build_item_delete(items: List[Dict[str, Any]], config: ApiConfig | None = None) -> str:
     """
-    itemDelete: удаление товаров по itemNumber.
-    items: список словарей с ключом itemNumber/item_number.
+    itemDelete: удаление товаров по itemID или itemNumber.
+    items: список словарей с ключами itemID/item_id или itemNumber/item_number.
     """
     config = config or ApiConfig.from_env()
     parts = []
     for it in items:
+        item_id = it.get("itemID") or it.get("item_id")
         item_number = it.get("itemNumber") or it.get("item_number")
+        if item_id:
+            parts.append(f"<item><itemID>{_escape_text(str(item_id))}</itemID></item>")
+            continue
         if not item_number:
             continue
         parts.append(f"<item><itemNumber>{_escape_text(str(item_number))}</itemNumber></item>")

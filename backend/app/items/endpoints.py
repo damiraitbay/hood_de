@@ -38,6 +38,47 @@ logger = get_logger("items")
 FAILED_ITEMS_PATH = Path(settings.LOG_FOLDER).resolve() / "failed_items.json"
 
 
+def _load_all_hood_items(cfg: ApiConfig, item_status: str = "running", group_size: int = 500) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    start_at = 1
+
+    while True:
+        xml_body = build_item_list(
+            item_status=item_status,
+            start_at=start_at,
+            group_size=group_size,
+            start_date=None,
+            end_date=None,
+            config=cfg,
+        )
+        try:
+            response_xml = send_request(xml_body, config=cfg)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+
+        page = parse_item_list_response(response_xml)
+        if page.get("errors"):
+            raise HTTPException(
+                status_code=502,
+                detail={"message": page.get("message"), "errors": page.get("errors")},
+            )
+
+        page_items = page.get("items", [])
+        items.extend(page_items)
+
+        total_records = int(page.get("total_records") or 0)
+        if not page_items:
+            break
+        if total_records and len(items) >= total_records:
+            break
+        if len(page_items) < group_size:
+            break
+
+        start_at += group_size
+
+    return items
+
+
 def _resolve_description_for_api(norm: Dict[str, Any]) -> str:
     """
     Для API отправляем HTML-описание по EAN, если найден файл <EAN>.html/.htm.
@@ -526,6 +567,91 @@ def delete_items_by_item_number(item_numbers: List[str] = Body(..., embed=True))
     resp["item_numbers"] = normalized
     resp["requested"] = len(normalized)
     return resp
+
+
+@router.delete("/delete/all")
+def delete_all_items_from_hood(
+    item_status: str = Query(default="running"),
+    delete_batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    cfg = ApiConfig.from_env()
+    hood_items = _load_all_hood_items(cfg=cfg, item_status=item_status, group_size=500)
+
+    item_ids: List[str] = []
+    seen: set[str] = set()
+    missing_item_id = 0
+
+    for item in hood_items:
+        item_id = str(item.get("itemID") or "").strip()
+        if not item_id:
+            missing_item_id += 1
+            continue
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        item_ids.append(item_id)
+
+    if not item_ids:
+        return {
+            "success": True,
+            "item_status": item_status,
+            "found_in_item_list": len(hood_items),
+            "missing_item_id": missing_item_id,
+            "requested": 0,
+            "deleted": 0,
+            "failed": 0,
+            "details": [],
+        }
+
+    responses: List[Dict[str, Any]] = []
+    deleted = 0
+    failed = 0
+
+    for i in range(0, len(item_ids), delete_batch_size):
+        chunk = item_ids[i : i + delete_batch_size]
+        xml_delete = build_item_delete(
+            items=[{"itemID": item_id} for item_id in chunk],
+            config=cfg,
+        )
+        try:
+            delete_resp_xml = send_request(xml_delete, config=cfg)
+        except Exception as exc:
+            failed += len(chunk)
+            responses.append(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "requested_item_ids": chunk,
+                }
+            )
+            continue
+
+        resp = parse_item_delete_response(delete_resp_xml)
+        responses.append(resp)
+
+        item_results = resp.get("items", [])
+        if item_results:
+            batch_deleted = sum(1 for x in item_results if str(x.get("status") or "").lower() == "success")
+            batch_failed = sum(1 for x in item_results if str(x.get("status") or "").lower() == "failed")
+            deleted += batch_deleted
+            failed += batch_failed
+            unresolved = max(len(chunk) - batch_deleted - batch_failed, 0)
+            failed += unresolved
+        elif resp.get("success"):
+            deleted += len(chunk)
+        else:
+            failed += len(chunk)
+
+    return {
+        "success": failed == 0,
+        "item_status": item_status,
+        "found_in_item_list": len(hood_items),
+        "missing_item_id": missing_item_id,
+        "requested": len(item_ids),
+        "deleted": deleted,
+        "failed": failed,
+        "details": responses,
+    }
 
 
 @router.post("/update_prices")

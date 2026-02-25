@@ -75,6 +75,7 @@ export default function App() {
       validateOne: `${base}/items/validate_one/`,
       uploadOneBulk: `${base}/items/upload_one`,
       deleteByItemNumberBulk: `${base}/items/delete/by-item-number`,
+      deleteAll: `${base}/items/delete/all`,
     };
   }, [apiBase]);
 
@@ -302,6 +303,11 @@ export default function App() {
     });
   }
 
+  async function deleteAllInHood() {
+    if (!window.confirm("Delete ALL items in Hood? This action cannot be undone.")) return;
+    await call("DELETE", endpoints.deleteAll, "Delete ALL items");
+  }
+
   const statusClass = `status status-${status.type}`;
 
   return (
@@ -501,6 +507,9 @@ export default function App() {
           </label>
           <button className="btn danger" disabled={loading || !deleteItemNumbers.trim()} onClick={deleteByItemNumber}>
             Delete in Hood
+          </button>
+          <button className="btn danger" disabled={loading} onClick={deleteAllInHood}>
+            Delete ALL in Hood
           </button>
         </div>
       </section>
