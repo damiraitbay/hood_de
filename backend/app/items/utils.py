@@ -232,12 +232,12 @@ def normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
     elif raw.get("PictureURL"):
         images = [str(raw["PictureURL"])]
 
-    # CategoryID: если исходный не из твоего списка — подбираем ближайший
-    valid_ids = {c["category_id"] for c in CATEGORIES}
-    if not original_category or original_category not in valid_ids:
-        category = closest_category(str(item_name))
-    else:
+    # CategoryID: если в исходном JSON уже задана категория, оставляем ее.
+    # Подбор по названию используем только когда CategoryID пустой.
+    if original_category:
         category = original_category
+    else:
+        category = closest_category(str(item_name))
 
     def first_present(*keys: str) -> Any:
         for key in keys:
