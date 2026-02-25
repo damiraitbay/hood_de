@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict
 
 
@@ -140,16 +141,70 @@ PROPERTY_NAME_ALIASES = {
     "Produktart:": "Produktart",
 }
 
+CATEGORY_KEYWORDS = {
+    "5305": {"notebook", "laptop", "ultrabook", "macbook"},
+    "5378": {"pc", "desktop", "computer", "rechner", "tower"},
+    "5209": {"monitor", "display", "bildschirm", "screen"},
+    "5187": {"klassiker", "retro", "amiga", "commodore", "atari"},
+    "29622": {"refurbished", "generaluberholt", "wiederaufbereitet", "renewed"},
+    "6489": {"digitalkamera", "kamera", "camera", "dslr"},
+    "22041": {"camcorder", "videokamera", "video"},
+    "6943": {"handy", "smartphone", "iphone", "android", "samsung", "xiaomi"},
+    "29618": {"kosmetik", "creme", "shampoo", "pflege", "beauty"},
+    "29625": {"garten", "gartnern", "pflanze", "saat", "seed"},
+    "3921": {"sammlung", "paket", "set", "lot", "konvolut", "bundle"},
+}
 
-def closest_category(item_name: str) -> str:
+
+def _normalize_text(text: str) -> str:
+    t = str(text or "").lower()
+    repl = {
+        "ä": "ae",
+        "ö": "oe",
+        "ü": "ue",
+        "ß": "ss",
+    }
+    for src, dst in repl.items():
+        t = t.replace(src, dst)
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def closest_category(item_name: str, description: str = "") -> str:
     """
     Берём ближайшую категорию из твоего списка,
     как в примере скрипта.
     """
-    item_lower = item_name.lower()
+    haystack = _normalize_text(f"{item_name} {description}")
+    if not haystack:
+        return CATEGORIES[0]["category_id"]
+
+    best_category_id = ""
+    best_score = 0
+
     for c in CATEGORIES:
-        words = c["category_name"].split()
-        if any(word.lower() in item_lower for word in words):
+        cid = c["category_id"]
+        cname = str(c["category_name"]).strip()
+        score = 0
+
+        name_tokens = [tok for tok in _normalize_text(cname).split() if tok and tok not in {"sonstige", "sonstiges"}]
+        score += sum(1 for tok in name_tokens if tok in haystack)
+
+        for kw in CATEGORY_KEYWORDS.get(cid, set()):
+            if _normalize_text(kw) in haystack:
+                score += 2
+
+        if score > best_score:
+            best_score = score
+            best_category_id = cid
+
+    if best_score > 0 and best_category_id:
+        return best_category_id
+
+    item_lower = _normalize_text(item_name)
+    for c in CATEGORIES:
+        words = [w for w in _normalize_text(c["category_name"]).split() if w not in {"sonstige", "sonstiges"}]
+        if words and any(word in item_lower for word in words):
             return c["category_id"]
     # fallback — первая категория из списка
     return CATEGORIES[0]["category_id"]
@@ -232,12 +287,13 @@ def normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
     elif raw.get("PictureURL"):
         images = [str(raw["PictureURL"])]
 
-    # CategoryID: если в исходном JSON уже задана категория, оставляем ее.
-    # Подбор по названию используем только когда CategoryID пустой.
-    if original_category:
+    # CategoryID должна быть валидной по справочнику Hood.
+    # Если исходная категория невалидна/пустая, подбираем по названию+описанию.
+    valid_ids = {c["category_id"] for c in CATEGORIES}
+    if original_category and original_category in valid_ids:
         category = original_category
     else:
-        category = closest_category(str(item_name))
+        category = closest_category(str(item_name), str(description))
 
     def first_present(*keys: str) -> Any:
         for key in keys:
