@@ -105,6 +105,7 @@ export default function App() {
   }, [jsonItems, search]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectedFilesSet = useMemo(() => new Set(sourceFilesMulti), [sourceFilesMulti]);
   const selectedItems = useMemo(
     () => jsonItems.filter((it) => selectedSet.has(String(it.ID))),
     [jsonItems, selectedSet]
@@ -478,6 +479,10 @@ export default function App() {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
+  function toggleSourceFileSelection(fileName) {
+    setSourceFilesMulti((prev) => (prev.includes(fileName) ? prev.filter((x) => x !== fileName) : [...prev, fileName]));
+  }
+
   async function validateSelected() {
     if (!selectedIds.length) return;
     const firstId = selectedIds[0];
@@ -797,28 +802,45 @@ export default function App() {
               ))}
             </select>
           </label>
-          <label className="label grow">
-            Source files (multi)
-            <select
-              className="input"
-              multiple
-              value={sourceFilesMulti}
-              onChange={(e) => {
-                const selected = Array.from(e.target.selectedOptions).map((opt) => opt.value);
-                setSourceFilesMulti(selected);
-              }}
-              disabled={loading || jsonFiles.length === 0}
-            >
-              {jsonFiles.map((file) => (
-                <option key={`m-${file.file_name}`} value={file.file_name}>
-                  {file.file_name} ({file.item_count})
-                </option>
-              ))}
-            </select>
-          </label>
           <button className="btn primary" disabled={loading} onClick={loadJsonItems}>
             Load items
           </button>
+        </div>
+
+        <div className="itemsWrap">
+          {jsonFiles.length === 0 ? (
+            <div className="empty">No source files loaded yet.</div>
+          ) : (
+            <table className="itemsTable">
+              <thead>
+                <tr>
+                  <th>Select</th>
+                  <th>File</th>
+                  <th>Items</th>
+                </tr>
+              </thead>
+              <tbody>
+                {jsonFiles.map((file) => {
+                  const name = String(file.file_name);
+                  const active = selectedFilesSet.has(name);
+                  return (
+                    <tr key={`f-${name}`} className={active ? "rowActive" : ""} onClick={() => toggleSourceFileSelection(name)}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={active}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => toggleSourceFileSelection(name)}
+                        />
+                      </td>
+                      <td>{name}</td>
+                      <td>{file.item_count}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
 
         <div className="metrics">
