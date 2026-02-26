@@ -283,9 +283,10 @@ def normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
     # ???????????: ?????????? pictureurls (??????) ??? PictureURL (????)
     images = []
     if isinstance(raw.get("pictureurls"), list):
-        images = [str(u) for u in raw["pictureurls"] if u]
+        images = [str(u).strip() for u in raw["pictureurls"] if str(u or "").strip()]
     elif raw.get("PictureURL"):
-        images = [str(raw["PictureURL"])]
+        single = str(raw["PictureURL"]).strip()
+        images = [single] if single else []
 
     # CategoryID должна быть валидной по справочнику Hood.
     # Если исходная категория невалидна/пустая, подбираем по названию+описанию.

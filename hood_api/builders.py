@@ -297,7 +297,8 @@ def _build_item_insert_or_validate(
         f'<shipmethod name="{_escape_text(str(m.get("name", "DHLPacket")))}_{_escape_text(str(m.get("country", "nat")))}"><value>{_escape_text(str(m.get("value", "0")))}</value></shipmethod>'
         for m in ship_list
     )
-    images_xml = "".join(f"<imageURL>{html.escape((u or '').strip())}</imageURL>" for u in (image_urls or []))
+    clean_image_urls = [str(u).strip() for u in (image_urls or []) if str(u or "").strip()]
+    images_xml = "".join(f"<imageURL>{html.escape(u)}</imageURL>" for u in clean_image_urls)
     ean_ok = (ean or "").strip()
     mpn_ok = (mpn or "").strip()
     item_number_ok = (item_number or "").strip()
@@ -583,7 +584,8 @@ def build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = No
             f'<shipmethod name="{_escape_text(str(m.get("name", "DHLPacket")))}_{_escape_text(str(m.get("country", "nat")))}"><value>{_escape_text(str(m.get("value", "0")))}</value></shipmethod>'
             for m in ship_methods
         )
-        images_xml = "".join(f"<imageURL>{html.escape((u or '').strip())}</imageURL>" for u in image_urls)
+        clean_image_urls = [str(u).strip() for u in image_urls if str(u or "").strip()]
+        images_xml = "".join(f"<imageURL>{html.escape(u)}</imageURL>" for u in clean_image_urls)
 
         properties_xml_parts = []
         for prop in product_properties:
