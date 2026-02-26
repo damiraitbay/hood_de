@@ -48,6 +48,8 @@ logger = get_logger("items")
 FAILED_ITEMS_PATH = Path(settings.LOG_FOLDER).resolve() / "failed_items.json"
 UPDATE_JOBS: Dict[str, Dict[str, Any]] = {}
 UPDATE_JOBS_LOCK = threading.Lock()
+UPLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
+UPLOAD_JOBS_LOCK = threading.Lock()
 
 
 def _account_mode(account: str | None) -> str | None:
@@ -283,6 +285,13 @@ def _set_update_job(job_id: str, patch: Dict[str, Any]) -> None:
         current = UPDATE_JOBS.get(job_id, {})
         current.update(patch)
         UPDATE_JOBS[job_id] = current
+
+
+def _set_upload_job(job_id: str, patch: Dict[str, Any]) -> None:
+    with UPLOAD_JOBS_LOCK:
+        current = UPLOAD_JOBS.get(job_id, {})
+        current.update(patch)
+        UPLOAD_JOBS[job_id] = current
 
 
 def _run_items_update(
@@ -764,6 +773,86 @@ def items_update_async_status(job_id: str) -> Dict[str, Any]:
     return job
 
 
+def _run_items_upload_job(job_id: str, limit: int, source_file: str | None, account: str | None) -> None:
+    _set_upload_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+        },
+    )
+
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_upload_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
+    try:
+        result = asyncio.run(_run_items_upload(limit=limit, source_file=source_file, account=account, progress_cb=progress_cb))
+    except Exception as exc:
+        _set_upload_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+                "progress": {"phase": "failed"},
+            },
+        )
+        return
+
+    _set_upload_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+            "progress": {
+                "phase": "completed",
+                "total_items": len(result),
+                "processed_items": len(result),
+                "success": sum(1 for r in result if r.get("success")),
+                "failed": sum(1 for r in result if not r.get("success")),
+            },
+        },
+    )
+
+
+@router.post("/upload_async")
+def items_upload_async(
+    background_tasks: BackgroundTasks,
+    limit: int = 1,
+    source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    _account_mode(account)
+    job_id = uuid4().hex
+    _set_upload_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "limit": limit,
+            "source_file": source_file,
+            "account": account,
+        },
+    )
+    background_tasks.add_task(_run_items_upload_job, job_id, limit, source_file, account)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/upload_async/{job_id}",
+    }
+
+
+@router.get("/upload_async/{job_id}")
+def items_upload_async_status(job_id: str) -> Dict[str, Any]:
+    with UPLOAD_JOBS_LOCK:
+        job = UPLOAD_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
 @router.get("/status")
 def items_status() -> Dict[str, Any]:
     """
@@ -836,11 +925,11 @@ def items_validate(account: str | None = Query(default=None)) -> List[Dict[str, 
     return results
 
 
-@router.post("/upload")
-async def items_upload(
+async def _run_items_upload(
     limit: int = 1,
-    source_file: str | None = Query(default=None),
-    account: str | None = Query(default=None),
+    source_file: str | None = None,
+    account: str | None = None,
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> List[Dict[str, Any]]:
     """
     РђСЃРёРЅС…СЂРѕРЅРЅР°СЏ Р·Р°РіСЂСѓР·РєР° Р’РЎР•РҐ С‚РѕРІР°СЂРѕРІ РёР· JSON РІ Hood.
@@ -875,9 +964,22 @@ async def items_upload(
     results: List[Dict[str, Any]] = []
     processed_count = 0
     total_count = len(to_upload)
+    success_count = 0
+    failed_count = 0
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "prepared",
+                "total_items": total_count,
+                "processed_items": 0,
+                "success": 0,
+                "failed": 0,
+            }
+        )
 
     async def worker(norm: Dict[str, Any]) -> None:
-        nonlocal processed_count
+        nonlocal processed_count, success_count, failed_count
         async with semaphore:
             api_description = _resolve_description_for_api(norm, html_folder=html_folder)
             payload = _build_item_payload_from_norm(norm, api_description)
@@ -933,6 +1035,24 @@ async def items_upload(
 
             results.append(resp)
             processed_count += 1
+            if resp.get("success"):
+                success_count += 1
+            else:
+                failed_count += 1
+
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "phase": "uploading",
+                        "total_items": total_count,
+                        "processed_items": processed_count,
+                        "success": success_count,
+                        "failed": failed_count,
+                        "last_reference_id": norm["reference_id"],
+                        "last_success": bool(resp.get("success")),
+                        "last_error": resp.get("error") or resp.get("item_message"),
+                    }
+                )
             
             # Р›РѕРіРёСЂСѓРµРј РїСЂРѕРіСЂРµСЃСЃ РєР°Р¶РґС‹Рµ 10 С‚РѕРІР°СЂРѕРІ РёР»Рё РЅР° РєР°Р¶РґРѕРј 10-Рј, 20-Рј, 30-Рј Рё С‚.Рґ.
             if processed_count % 10 == 0 or processed_count == total_count:
@@ -953,8 +1073,26 @@ async def items_upload(
         f"Р—Р°РіСЂСѓР·РєР° Р·Р°РІРµСЂС€РµРЅР°. РЈСЃРїРµС€РЅРѕ: {len(results) - len(failed_items)}, "
         f"СЃ РѕС€РёР±РєР°РјРё: {len(failed_items)}. Р¤Р°Р№Р» СЃ РѕС€РёР±РѕС‡РЅС‹РјРё С‚РѕРІР°СЂР°РјРё: {FAILED_ITEMS_PATH}"
     )
-
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "total_items": total_count,
+                "processed_items": total_count,
+                "success": success_count,
+                "failed": failed_count,
+            }
+        )
     return results
+
+
+@router.post("/upload")
+async def items_upload(
+    limit: int = 1,
+    source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+) -> List[Dict[str, Any]]:
+    return await _run_items_upload(limit=limit, source_file=source_file, account=account)
 
 
 @router.delete("/delete/by-item-number/{item_number}")

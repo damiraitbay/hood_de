@@ -72,6 +72,7 @@ export default function App() {
     return {
       docs: `${base}/docs`,
       upload: `${base}/items/upload`,
+      uploadAsync: `${base}/items/upload_async`,
       update: `${base}/items/update`,
       updateAsync: `${base}/items/update_async`,
       status: `${base}/items/status`,
@@ -186,6 +187,61 @@ export default function App() {
       }
     } catch (e) {
       setUiStatus("error", "Async update", String(e));
+      stopUpdatePolling();
+    }
+  }
+
+  async function pollUploadJob(jobId) {
+    const url = withAccount(`${endpoints.uploadAsync}/${encodeURIComponent(jobId)}`);
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`GET ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", "Async upload", `Status check failed: HTTP ${res.status}`);
+        stopUpdatePolling();
+        return;
+      }
+
+      const statusValue = String(data?.status || "");
+      const progress = data?.progress || {};
+      const processedItems = Number(progress?.processed_items || 0);
+      const totalItems = Number(progress?.total_items || data?.result?.length || 0);
+      const successItems = Number(progress?.success || 0);
+      const failedItems = Number(progress?.failed || 0);
+      const phase = String(progress?.phase || "");
+
+      if (statusValue === "queued") {
+        setUiStatus("loading", "Async upload", `Queued. Job: ${jobId}`);
+        return;
+      }
+      if (statusValue === "running") {
+        setUiStatus(
+          "loading",
+          "Async upload",
+          `Running: ${processedItems}/${totalItems} processed, success ${successItems}, failed ${failedItems}${phase ? ` (${phase})` : ""}`
+        );
+        return;
+      }
+      if (statusValue === "completed") {
+        setUiStatus(
+          "success",
+          "Async upload",
+          `Completed: success ${successItems}, failed ${failedItems}, processed ${processedItems}/${totalItems}`
+        );
+        stopUpdatePolling();
+        return;
+      }
+      if (statusValue === "failed") {
+        setUiStatus("error", "Async upload", `Failed: ${data?.error || "unknown error"}`);
+        stopUpdatePolling();
+      }
+    } catch (e) {
+      setUiStatus("error", "Async upload", String(e));
       stopUpdatePolling();
     }
   }
@@ -360,8 +416,43 @@ export default function App() {
       return;
     }
     if (!window.confirm(`Upload all items from selected file: ${sourceFile}?`)) return;
-    const url = withSource(`${endpoints.upload}?limit=0`);
-    await call("POST", url, `Upload all from selected file (${sourceFile})`);
+    const url = withSource(`${endpoints.uploadAsync}?limit=0`);
+    setLoading(true);
+    setRawOutput("");
+    setUiStatus("loading", "Async upload", `Starting async upload for ${sourceFile}...`);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`POST ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", "Async upload", `HTTP ${res.status}. Open technical details below.`);
+        return;
+      }
+
+      const jobId = String(data?.job_id || "").trim();
+      if (!jobId) {
+        setUiStatus("error", "Async upload", "job_id is missing in response.");
+        return;
+      }
+      setActiveUpdateJobId(jobId);
+      stopUpdatePolling();
+      setUiStatus("loading", "Async upload", `Queued. Job: ${jobId}`);
+      await pollUploadJob(jobId);
+      updatePollTimerRef.current = setInterval(() => {
+        pollUploadJob(jobId);
+      }, 2000);
+    } catch (e) {
+      setUiStatus("error", "Async upload", String(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function updateAllFromSelectedFile() {
@@ -675,7 +766,7 @@ export default function App() {
       <section className="card">
         <h2 className="cardTitle">Result</h2>
         <div className="resultMain">{status.text}</div>
-        {activeUpdateJobId ? <div className="hint">Active update job: <code>{activeUpdateJobId}</code></div> : null}
+        {activeUpdateJobId ? <div className="hint">Active async job: <code>{activeUpdateJobId}</code></div> : null}
         <details className="advanced">
           <summary>Technical details</summary>
           <pre className="output">{rawOutput || "-"}</pre>
