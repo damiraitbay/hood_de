@@ -82,6 +82,7 @@ export default function App() {
       uploadOneBulk: `${base}/items/upload_one`,
       updateOneBulk: `${base}/items/update_one`,
       deleteByItemNumberBulk: `${base}/items/delete/by-item-number`,
+      deleteBySourceFile: `${base}/items/delete/by-source-file`,
       deleteAll: `${base}/items/delete/all`,
     };
   }, [apiBase]);
@@ -531,6 +532,15 @@ export default function App() {
     await call("DELETE", withAccount(endpoints.deleteAll), "Delete ALL items");
   }
 
+  async function deleteAllFromSelectedFile() {
+    if (!sourceFile) {
+      setUiStatus("error", "Delete from selected file", "Select a source file first.");
+      return;
+    }
+    if (!window.confirm(`Delete all items in Hood from selected file: ${sourceFile}?`)) return;
+    await call("POST", withSource(endpoints.deleteBySourceFile), `Delete all from file (${sourceFile})`);
+  }
+
   useEffect(() => () => stopUpdatePolling(), []);
 
   const statusClass = `status status-${status.type}`;
@@ -756,6 +766,9 @@ export default function App() {
           </label>
           <button className="btn danger" disabled={loading || !deleteItemNumbers.trim()} onClick={deleteByItemNumber}>
             Delete in Hood
+          </button>
+          <button className="btn danger" disabled={loading || !sourceFile} onClick={deleteAllFromSelectedFile}>
+            Delete all from selected file
           </button>
           <button className="btn danger" disabled={loading} onClick={deleteAllInHood}>
             Delete ALL in Hood

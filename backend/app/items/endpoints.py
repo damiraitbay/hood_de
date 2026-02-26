@@ -1274,6 +1274,103 @@ def delete_items_by_item_number(
     return resp
 
 
+@router.post("/delete/by-source-file")
+def delete_items_by_source_file(
+    source_file: str = Query(...),
+    account: str | None = Query(default=None),
+    batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+
+    try:
+        source_items = load_items_from_source_file(source_file, json_folder=json_folder)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"JSON file not found: {source_file}")
+
+    item_numbers: List[str] = []
+    seen: set[str] = set()
+    skipped_missing = 0
+
+    for raw in source_items:
+        norm = normalize_item(raw)
+        item_number = str(norm.get("item_number") or norm.get("ean") or "").strip()
+        if not item_number:
+            skipped_missing += 1
+            continue
+        if item_number in seen:
+            continue
+        seen.add(item_number)
+        item_numbers.append(item_number)
+
+    if not item_numbers:
+        return {
+            "account": account_mode,
+            "source_file": source_file,
+            "found_in_file": len(source_items),
+            "requested": 0,
+            "deleted": 0,
+            "failed": 0,
+            "skipped_missing_item_number": skipped_missing,
+            "details": [],
+        }
+
+    details: List[Dict[str, Any]] = []
+    deleted = 0
+    failed = 0
+
+    for i in range(0, len(item_numbers), batch_size):
+        chunk = item_numbers[i : i + batch_size]
+        xml_delete = build_item_delete(
+            items=[{"itemNumber": item_number} for item_number in chunk],
+            config=cfg,
+        )
+        try:
+            delete_resp_xml = send_request(xml_delete, config=cfg)
+        except Exception as exc:
+            failed += len(chunk)
+            details.append(
+                {
+                    "success": False,
+                    "status": "error",
+                    "message": str(exc),
+                    "requested_item_numbers": chunk,
+                }
+            )
+            continue
+
+        parsed = parse_item_delete_response(delete_resp_xml)
+        parsed["requested_item_numbers"] = chunk
+        details.append(parsed)
+
+        item_results = parsed.get("items") or []
+        if item_results:
+            batch_deleted = sum(1 for x in item_results if str(x.get("status") or "").lower() == "success")
+            batch_failed = sum(1 for x in item_results if str(x.get("status") or "").lower() == "failed")
+            deleted += batch_deleted
+            failed += batch_failed
+            unresolved = max(len(chunk) - batch_deleted - batch_failed, 0)
+            failed += unresolved
+        elif parsed.get("success"):
+            deleted += len(chunk)
+        else:
+            failed += len(chunk)
+
+    return {
+        "account": account_mode,
+        "source_file": source_file,
+        "found_in_file": len(source_items),
+        "requested": len(item_numbers),
+        "deleted": deleted,
+        "failed": failed,
+        "skipped_missing_item_number": skipped_missing,
+        "details": details,
+    }
+
+
 @router.delete("/delete/all")
 def delete_all_items_from_hood(
     item_status: str = Query(default="running"),
