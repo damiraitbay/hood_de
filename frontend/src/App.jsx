@@ -218,6 +218,9 @@ export default function App() {
 
       const statusValue = String(data?.status || "");
       const progress = data?.progress || {};
+      const filesTotal = Number(progress?.files_total || 0);
+      const filesCompleted = Number(progress?.files_completed || 0);
+      const isManyFiles = filesTotal > 0 || data?.mode === "many_files";
       const processedItems = Number(progress?.processed_items || 0);
       const totalItems = Number(progress?.total_items || data?.result?.length || 0);
       const successItems = Number(progress?.success || 0);
@@ -229,19 +232,17 @@ export default function App() {
         return;
       }
       if (statusValue === "running") {
-        setUiStatus(
-          "loading",
-          "Async upload",
-          `Running: ${processedItems}/${totalItems} processed, success ${successItems}, failed ${failedItems}${phase ? ` (${phase})` : ""}`
-        );
+        const mainText = isManyFiles
+          ? `Running: files ${filesCompleted}/${filesTotal}, success ${successItems}, failed ${failedItems}`
+          : `Running: ${processedItems}/${totalItems} processed, success ${successItems}, failed ${failedItems}`;
+        setUiStatus("loading", "Async upload", `${mainText}${phase ? ` (${phase})` : ""}`);
         return;
       }
       if (statusValue === "completed") {
-        setUiStatus(
-          "success",
-          "Async upload",
-          `Completed: success ${successItems}, failed ${failedItems}, processed ${processedItems}/${totalItems}`
-        );
+        const completedText = isManyFiles
+          ? `Completed: files ${filesCompleted}/${filesTotal}, success ${successItems}, failed ${failedItems}`
+          : `Completed: success ${successItems}, failed ${failedItems}, processed ${processedItems}/${totalItems}`;
+        setUiStatus("success", "Async upload", completedText);
         stopUpdatePolling();
         return;
       }
