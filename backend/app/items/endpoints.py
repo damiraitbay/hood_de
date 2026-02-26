@@ -294,6 +294,98 @@ def _set_upload_job(job_id: str, patch: Dict[str, Any]) -> None:
         UPLOAD_JOBS[job_id] = current
 
 
+def _load_ref_to_item_id_map(cfg: ApiConfig) -> Dict[str, str]:
+    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
+    return {
+        str(it.get("referenceID") or "").strip(): str(it.get("itemID") or "").strip()
+        for it in hood_items
+        if str(it.get("referenceID") or "").strip() and str(it.get("itemID") or "").strip()
+    }
+
+
+def _is_item_number_ambiguous_error(parsed: Dict[str, Any]) -> bool:
+    haystack: List[str] = []
+    if parsed.get("message"):
+        haystack.append(str(parsed["message"]))
+    for err in parsed.get("errors") or []:
+        haystack.append(str(err))
+    for item in parsed.get("items") or []:
+        msg = item.get("message")
+        if msg:
+            haystack.append(str(msg))
+    text = " ".join(haystack).lower()
+    return ("artikelnummer" in text) and ("nicht eindeutig" in text)
+
+
+def _send_update_chunk_with_fallback(
+    chunk: List[Dict[str, Any]],
+    cfg: ApiConfig,
+    ref_to_item_id: Dict[str, str],
+) -> Dict[str, Any]:
+    chunk_numbers = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
+    xml_update = build_item_update(items=chunk, config=cfg)
+    try:
+        resp_xml = send_request(xml_update, config=cfg)
+        parsed = parse_item_update_response(resp_xml)
+    except Exception as exc:
+        parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+    parsed["item_numbers"] = chunk_numbers
+
+    # Normal successful case.
+    if parsed.get("success"):
+        return {"details": [parsed], "updated": len(chunk_numbers), "failed": 0}
+
+    # Retry by itemID only for specific ambiguity error.
+    if not _is_item_number_ambiguous_error(parsed):
+        return {"details": [parsed], "updated": 0, "failed": len(chunk_numbers)}
+
+    details: List[Dict[str, Any]] = []
+    updated = 0
+    failed = 0
+
+    parsed["fallback"] = "retry_by_itemID"
+    details.append(parsed)
+
+    for payload in chunk:
+        ref = str(payload.get("reference_id") or "").strip()
+        number = str(payload.get("item_number") or payload.get("ean") or "").strip()
+        item_id = ref_to_item_id.get(ref)
+        if not item_id:
+            failed += 1
+            details.append(
+                {
+                    "success": False,
+                    "status": "failed",
+                    "message": "fallback failed: itemID not found by referenceID",
+                    "errors": [],
+                    "item_numbers": [number],
+                    "reference_id": ref,
+                    "fallback": "itemID",
+                }
+            )
+            continue
+
+        retry_payload = dict(payload)
+        retry_payload["itemID"] = item_id
+        xml_retry = build_item_update(items=[retry_payload], config=cfg)
+        try:
+            retry_xml = send_request(xml_retry, config=cfg)
+            retry_parsed = parse_item_update_response(retry_xml)
+        except Exception as exc:
+            retry_parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+        retry_parsed["item_numbers"] = [number]
+        retry_parsed["item_ids"] = [item_id]
+        retry_parsed["fallback"] = "itemID"
+        details.append(retry_parsed)
+
+        if retry_parsed.get("success"):
+            updated += 1
+        else:
+            failed += 1
+
+    return {"details": details, "updated": updated, "failed": failed}
+
+
 def _run_items_update(
     limit: int,
     source_file: str | None,
@@ -341,6 +433,7 @@ def _run_items_update(
     failed = len(skipped)
     total_chunks = len(chunks)
     total_items = len(update_payloads)
+    ref_to_item_id = _load_ref_to_item_id_map(cfg)
 
     if progress_cb is not None:
         progress_cb(
@@ -358,20 +451,12 @@ def _run_items_update(
         )
 
     for idx, chunk in enumerate(chunks, start=1):
-        xml_update = build_item_update(items=chunk, config=cfg)
         chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
-        try:
-            resp_xml = send_request(xml_update, config=cfg)
-            parsed = parse_item_update_response(resp_xml)
-        except Exception as exc:
-            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
-
-        parsed["item_numbers"] = chunk_ids
-        details.append(parsed)
-        if parsed.get("success"):
-            updated += len(chunk_ids)
-        else:
-            failed += len(chunk_ids)
+        chunk_result = _send_update_chunk_with_fallback(chunk=chunk, cfg=cfg, ref_to_item_id=ref_to_item_id)
+        details.extend(chunk_result["details"])
+        updated += int(chunk_result["updated"])
+        failed += int(chunk_result["failed"])
+        last_detail = chunk_result["details"][-1] if chunk_result["details"] else {}
 
         if progress_cb is not None:
             progress_cb(
@@ -384,10 +469,10 @@ def _run_items_update(
                     "updated": updated,
                     "failed": failed,
                     "last_chunk_item_numbers": chunk_ids,
-                    "last_chunk_success": bool(parsed.get("success")),
-                    "last_chunk_status": parsed.get("status"),
-                    "last_chunk_message": parsed.get("message"),
-                    "last_chunk_errors": parsed.get("errors") or [],
+                    "last_chunk_success": bool(last_detail.get("success")),
+                    "last_chunk_status": last_detail.get("status"),
+                    "last_chunk_message": last_detail.get("message"),
+                    "last_chunk_errors": last_detail.get("errors") or [],
                 }
             )
 
@@ -646,22 +731,13 @@ def update_many(
     details: List[Dict[str, Any]] = []
     updated = 0
     failed = len(skipped)
+    ref_to_item_id = _load_ref_to_item_id_map(cfg)
 
     for chunk in chunks:
-        xml_update = build_item_update(items=chunk, config=cfg)
-        chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
-        try:
-            resp_xml = send_request(xml_update, config=cfg)
-            parsed = parse_item_update_response(resp_xml)
-        except Exception as exc:
-            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
-
-        parsed["item_numbers"] = chunk_ids
-        details.append(parsed)
-        if parsed.get("success"):
-            updated += len(chunk_ids)
-        else:
-            failed += len(chunk_ids)
+        chunk_result = _send_update_chunk_with_fallback(chunk=chunk, cfg=cfg, ref_to_item_id=ref_to_item_id)
+        details.extend(chunk_result["details"])
+        updated += int(chunk_result["updated"])
+        failed += int(chunk_result["failed"])
 
     return {
         "requested": len(normalized_ids),
@@ -1340,23 +1416,11 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
     # itemUpdate РїСЂРёРЅРёРјР°РµС‚ РґРѕ 5 С‚РѕРІР°СЂРѕРІ Р·Р° СЂР°Р· вЂ” Р±СЊС‘Рј РЅР° С‡Р°РЅРєРё
     chunks = [updates[i : i + 5] for i in range(0, len(updates), 5)]
     all_responses: List[Dict[str, Any]] = []
+    ref_to_item_id = _load_ref_to_item_id_map(cfg)
 
     for chunk in chunks:
-        xml_update = build_item_update(items=chunk, config=cfg)
-        try:
-            resp_xml = send_request(xml_update, config=cfg)
-        except Exception as exc:
-            all_responses.append(
-                {
-                    "success": False,
-                    "error": str(exc),
-                    "items": [u.get("item_number") for u in chunk],
-                }
-            )
-            continue
-        parsed = parse_item_update_response(resp_xml)
-        parsed["items"] = [u.get("item_number") for u in chunk]
-        all_responses.append(parsed)
+        chunk_result = _send_update_chunk_with_fallback(chunk=chunk, cfg=cfg, ref_to_item_id=ref_to_item_id)
+        all_responses.extend(chunk_result["details"])
 
     return {
         "updated": len(updates),
