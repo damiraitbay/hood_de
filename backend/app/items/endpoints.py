@@ -1734,6 +1734,106 @@ def delete_all_items_from_hood(
     }
 
 
+@router.post("/delete/duplicates-by-ean")
+def delete_duplicate_ean_items(
+    account: str | None = Query(default=None),
+    keep_one: bool = Query(default=True),
+    delete_batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    cache: Dict[str, Any] = {}
+    mapping = _get_item_number_to_ids_map(cfg=cfg, cache=cache)
+
+    duplicate_groups: Dict[str, List[str]] = {}
+    for ean, item_ids in mapping.items():
+        ids = [str(x).strip() for x in item_ids if str(x).strip()]
+        ids = sorted(set(ids))
+        if len(ids) > 1:
+            duplicate_groups[ean] = ids
+
+    if not duplicate_groups:
+        return {
+            "account": account_mode,
+            "success": True,
+            "duplicate_ean_count": 0,
+            "requested_item_ids": 0,
+            "deleted": 0,
+            "failed": 0,
+            "details": [],
+        }
+
+    item_ids_to_delete: List[str] = []
+    per_ean_plan: List[Dict[str, Any]] = []
+    for ean, ids in duplicate_groups.items():
+        keep_id = ids[0] if keep_one else None
+        to_delete = ids[1:] if keep_one else ids
+        item_ids_to_delete.extend(to_delete)
+        per_ean_plan.append(
+            {
+                "ean": ean,
+                "item_ids": ids,
+                "kept_item_id": keep_id,
+                "delete_item_ids": to_delete,
+            }
+        )
+
+    item_ids_to_delete = sorted(set(item_ids_to_delete))
+    details: List[Dict[str, Any]] = []
+    deleted = 0
+    failed = 0
+
+    for i in range(0, len(item_ids_to_delete), delete_batch_size):
+        chunk = item_ids_to_delete[i : i + delete_batch_size]
+        xml_delete = build_item_delete(
+            items=[{"itemID": item_id} for item_id in chunk],
+            config=cfg,
+        )
+        try:
+            delete_resp_xml = send_request(xml_delete, config=cfg)
+        except Exception as exc:
+            failed += len(chunk)
+            details.append(
+                {
+                    "success": False,
+                    "status": "error",
+                    "message": str(exc),
+                    "requested_item_ids": chunk,
+                }
+            )
+            continue
+
+        parsed = parse_item_delete_response(delete_resp_xml)
+        parsed["method"] = "itemID"
+        parsed["requested_item_ids"] = chunk
+        details.append(parsed)
+
+        item_results = parsed.get("items") or []
+        if item_results:
+            batch_deleted = sum(1 for x in item_results if str(x.get("status") or "").lower() == "success")
+            batch_failed = sum(1 for x in item_results if str(x.get("status") or "").lower() == "failed")
+            deleted += batch_deleted
+            failed += batch_failed
+            unresolved = max(len(chunk) - batch_deleted - batch_failed, 0)
+            failed += unresolved
+        elif parsed.get("success"):
+            deleted += len(chunk)
+        else:
+            failed += len(chunk)
+
+    return {
+        "account": account_mode,
+        "success": failed == 0,
+        "keep_one": keep_one,
+        "duplicate_ean_count": len(duplicate_groups),
+        "requested_item_ids": len(item_ids_to_delete),
+        "deleted": deleted,
+        "failed": failed,
+        "plan": per_ean_plan,
+        "details": details,
+    }
+
+
 @router.post("/update_prices")
 def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
     """
