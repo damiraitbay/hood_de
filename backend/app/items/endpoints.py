@@ -1441,6 +1441,29 @@ def delete_items_by_item_number(
         else:
             failed += len(unique_numbers)
 
+        # Safety net: if any itemNumber still reported as ambiguous, delete it by itemID.
+        ambiguous_numbers = _ambiguous_failed_item_numbers(parsed=parsed, requested_item_numbers=unique_numbers)
+        if ambiguous_numbers:
+            recovered_ambiguous = 0
+            ambiguous_details: List[Dict[str, Any]] = []
+            for number in ambiguous_numbers:
+                fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=number, cache=cache)
+                ambiguous_details.append(fb)
+                if fb.get("success"):
+                    recovered_ambiguous += 1
+            if recovered_ambiguous:
+                deleted += recovered_ambiguous
+                failed = max(failed - recovered_ambiguous, 0)
+            details.append(
+                {
+                    "method": "itemID",
+                    "reason": "ambiguous_after_itemNumber_delete",
+                    "requested_item_numbers": ambiguous_numbers,
+                    "recovered": recovered_ambiguous,
+                    "details": ambiguous_details,
+                }
+            )
+
     if duplicate_numbers:
         fallback_details: List[Dict[str, Any]] = []
         recovered = 0
@@ -1560,6 +1583,29 @@ def delete_items_by_source_file(
             deleted += len(chunk)
         else:
             failed += len(chunk)
+
+        # Safety net: if API still reports ambiguous itemNumber in this chunk, delete by itemID.
+        ambiguous_numbers = _ambiguous_failed_item_numbers(parsed=parsed, requested_item_numbers=chunk)
+        if ambiguous_numbers:
+            recovered_ambiguous = 0
+            ambiguous_details: List[Dict[str, Any]] = []
+            for number in ambiguous_numbers:
+                fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=number, cache=fallback_cache)
+                ambiguous_details.append(fb)
+                if fb.get("success"):
+                    recovered_ambiguous += 1
+            if recovered_ambiguous:
+                deleted += recovered_ambiguous
+                failed = max(failed - recovered_ambiguous, 0)
+            details.append(
+                {
+                    "method": "itemID",
+                    "reason": "ambiguous_after_itemNumber_delete",
+                    "requested_item_numbers": ambiguous_numbers,
+                    "recovered": recovered_ambiguous,
+                    "details": ambiguous_details,
+                }
+            )
 
     if duplicate_numbers:
         recovered = 0
