@@ -4,7 +4,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
@@ -285,7 +285,12 @@ def _set_update_job(job_id: str, patch: Dict[str, Any]) -> None:
         UPDATE_JOBS[job_id] = current
 
 
-def _run_items_update(limit: int, source_file: str | None, account: str | None) -> Dict[str, Any]:
+def _run_items_update(
+    limit: int,
+    source_file: str | None,
+    account: str | None,
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
+) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
     json_folder = get_json_folder_for_account(account_mode)
@@ -325,8 +330,25 @@ def _run_items_update(limit: int, source_file: str | None, account: str | None) 
     details: List[Dict[str, Any]] = []
     updated = 0
     failed = len(skipped)
+    total_chunks = len(chunks)
+    total_items = len(update_payloads)
 
-    for chunk in chunks:
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "prepared",
+                "requested": len(norms),
+                "prepared": total_items,
+                "skipped": len(skipped),
+                "total_chunks": total_chunks,
+                "processed_chunks": 0,
+                "processed_items": 0,
+                "updated": 0,
+                "failed": failed,
+            }
+        )
+
+    for idx, chunk in enumerate(chunks, start=1):
         xml_update = build_item_update(items=chunk, config=cfg)
         chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
         try:
@@ -342,7 +364,25 @@ def _run_items_update(limit: int, source_file: str | None, account: str | None) 
         else:
             failed += len(chunk_ids)
 
-    return {
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "updating",
+                    "total_chunks": total_chunks,
+                    "processed_chunks": idx,
+                    "total_items": total_items,
+                    "processed_items": min(idx * 5, total_items),
+                    "updated": updated,
+                    "failed": failed,
+                    "last_chunk_item_numbers": chunk_ids,
+                    "last_chunk_success": bool(parsed.get("success")),
+                    "last_chunk_status": parsed.get("status"),
+                    "last_chunk_message": parsed.get("message"),
+                    "last_chunk_errors": parsed.get("errors") or [],
+                }
+            )
+
+    result = {
         "requested": len(norms),
         "prepared": len(update_payloads),
         "updated": updated,
@@ -352,6 +392,9 @@ def _run_items_update(limit: int, source_file: str | None, account: str | None) 
         "details": details,
         "skipped": skipped,
     }
+    if progress_cb is not None:
+        progress_cb({"phase": "completed", "result_summary": {"updated": updated, "failed": failed}})
+    return result
 
 
 def _upload_one_by_id(item_id: str, source_file: str | None = None, account: str | None = None) -> Dict[str, Any]:
@@ -648,8 +691,11 @@ def _run_items_update_job(job_id: str, limit: int, source_file: str | None, acco
             "started_at": _utc_now_iso(),
         },
     )
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_update_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
     try:
-        result = _run_items_update(limit=limit, source_file=source_file, account=account)
+        result = _run_items_update(limit=limit, source_file=source_file, account=account, progress_cb=progress_cb)
     except Exception as exc:
         _set_update_job(
             job_id,
@@ -657,6 +703,7 @@ def _run_items_update_job(job_id: str, limit: int, source_file: str | None, acco
                 "status": "failed",
                 "finished_at": _utc_now_iso(),
                 "error": str(exc),
+                "progress": {"phase": "failed"},
             },
         )
         return
@@ -667,6 +714,13 @@ def _run_items_update_job(job_id: str, limit: int, source_file: str | None, acco
             "status": "completed",
             "finished_at": _utc_now_iso(),
             "result": result,
+            "progress": {
+                "phase": "completed",
+                "total_items": result.get("prepared", 0),
+                "processed_items": result.get("prepared", 0),
+                "updated": result.get("updated", 0),
+                "failed": result.get("failed", 0),
+            },
         },
     )
 
