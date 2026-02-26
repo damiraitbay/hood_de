@@ -343,6 +343,115 @@ def _cleanup_duplicate_item_number(
     return result
 
 
+def _get_item_number_to_ids_map(cfg: ApiConfig, cache: Dict[str, Any]) -> Dict[str, List[str]]:
+    cached = cache.get("item_number_to_ids")
+    if cached is not None:
+        return cached
+    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
+    mapping: Dict[str, List[str]] = {}
+    for it in hood_items:
+        item_number = str(it.get("itemNumber") or "").strip()
+        item_id = str(it.get("itemID") or "").strip()
+        if not item_number or not item_id:
+            continue
+        if item_number not in mapping:
+            mapping[item_number] = [item_id]
+            continue
+        if item_id not in mapping[item_number]:
+            mapping[item_number].append(item_id)
+    cache["item_number_to_ids"] = mapping
+    return mapping
+
+
+def _is_ambiguous_message(text: str) -> bool:
+    low = str(text or "").lower()
+    return "artikelnummer" in low and "nicht eindeutig" in low
+
+
+def _ambiguous_failed_item_numbers(parsed: Dict[str, Any], requested_item_numbers: List[str]) -> List[str]:
+    requested_set = set(requested_item_numbers)
+    found: set[str] = set()
+    for it in parsed.get("items") or []:
+        status = str(it.get("status") or "").lower()
+        item_number = str(it.get("item_number") or "").strip()
+        msg = str(it.get("message") or "")
+        if status == "failed" and item_number and item_number in requested_set and _is_ambiguous_message(msg):
+            found.add(item_number)
+
+    if not found and _is_item_number_ambiguous_error(parsed):
+        # If API returned only global ambiguity error, assume all requested itemNumbers in this chunk are affected.
+        found = requested_set
+
+    return [x for x in requested_item_numbers if x in found]
+
+
+def _delete_one_item_number_by_item_ids(
+    cfg: ApiConfig,
+    item_number: str,
+    cache: Dict[str, Any],
+) -> Dict[str, Any]:
+    mapping = _get_item_number_to_ids_map(cfg=cfg, cache=cache)
+    item_ids = list(mapping.get(item_number) or [])
+    if not item_ids:
+        return {
+            "item_number": item_number,
+            "success": False,
+            "status": "failed",
+            "message": "No itemIDs found for itemNumber in Hood",
+            "deleted_item_ids": [],
+            "failed_item_ids": [],
+        }
+
+    deleted_item_ids: List[str] = []
+    failed_item_ids: List[str] = []
+    responses: List[Dict[str, Any]] = []
+
+    for i in range(0, len(item_ids), 200):
+        chunk = item_ids[i : i + 200]
+        xml_delete = build_item_delete(items=[{"itemID": x} for x in chunk], config=cfg)
+        try:
+            delete_resp_xml = send_request(xml_delete, config=cfg)
+        except Exception as exc:
+            failed_item_ids.extend(chunk)
+            responses.append({"success": False, "status": "error", "message": str(exc), "requested_item_ids": chunk})
+            continue
+
+        parsed = parse_item_delete_response(delete_resp_xml)
+        responses.append(parsed)
+        item_results = parsed.get("items") or []
+        if item_results:
+            for row in item_results:
+                item_id = str(row.get("item_id") or "").strip()
+                status = str(row.get("status") or "").lower()
+                if not item_id:
+                    continue
+                if status == "success":
+                    deleted_item_ids.append(item_id)
+                elif status == "failed":
+                    failed_item_ids.append(item_id)
+            unresolved = [x for x in chunk if x not in deleted_item_ids and x not in failed_item_ids]
+            failed_item_ids.extend(unresolved)
+        elif parsed.get("success"):
+            deleted_item_ids.extend(chunk)
+        else:
+            failed_item_ids.extend(chunk)
+
+    success = len(failed_item_ids) == 0 and len(deleted_item_ids) > 0
+    if success:
+        mapping[item_number] = []
+    else:
+        mapping[item_number] = [x for x in item_ids if x not in deleted_item_ids]
+
+    return {
+        "item_number": item_number,
+        "success": success,
+        "status": "success" if success else "failed",
+        "deleted_item_ids": deleted_item_ids,
+        "failed_item_ids": failed_item_ids,
+        "responses": responses,
+    }
+
+
 def _send_update_chunk_with_duplicate_cleanup(
     chunk: List[Dict[str, Any]],
     cfg: ApiConfig,
@@ -1321,6 +1430,7 @@ def delete_items_by_source_file(
     details: List[Dict[str, Any]] = []
     deleted = 0
     failed = 0
+    fallback_cache: Dict[str, Any] = {}
 
     for i in range(0, len(item_numbers), batch_size):
         chunk = item_numbers[i : i + batch_size]
@@ -1358,6 +1468,29 @@ def delete_items_by_source_file(
             deleted += len(chunk)
         else:
             failed += len(chunk)
+
+        ambiguous_numbers = _ambiguous_failed_item_numbers(parsed=parsed, requested_item_numbers=chunk)
+        if ambiguous_numbers:
+            recovered = 0
+            fallback_details: List[Dict[str, Any]] = []
+            for item_number in ambiguous_numbers:
+                fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=item_number, cache=fallback_cache)
+                fallback_details.append(fb)
+                if fb.get("success"):
+                    recovered += 1
+
+            if recovered:
+                deleted += recovered
+                failed = max(failed - recovered, 0)
+
+            details.append(
+                {
+                    "fallback": "delete_by_item_id_for_ambiguous_item_number",
+                    "requested_item_numbers": ambiguous_numbers,
+                    "recovered": recovered,
+                    "details": fallback_details,
+                }
+            )
 
     return {
         "account": account_mode,
