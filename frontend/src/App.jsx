@@ -50,6 +50,7 @@ export default function App() {
   const [accountMode, setAccountMode] = useState("jvmoebel");
   const [jsonFiles, setJsonFiles] = useState([]);
   const [sourceFile, setSourceFile] = useState("");
+  const [sourceFilesMulti, setSourceFilesMulti] = useState([]);
   const [jsonItems, setJsonItems] = useState([]);
   const [selectedIds, setSelectedIds] = useState([]);
   const [jsonTotal, setJsonTotal] = useState(null);
@@ -73,6 +74,7 @@ export default function App() {
       docs: `${base}/docs`,
       upload: `${base}/items/upload`,
       uploadAsync: `${base}/items/upload_async`,
+      uploadManyAsync: `${base}/items/upload_many_async`,
       update: `${base}/items/update`,
       updateAsync: `${base}/items/update_async`,
       deleteAsyncStatus: `${base}/items/delete_async`,
@@ -405,9 +407,16 @@ export default function App() {
 
       if (files.length === 0) {
         setSourceFile("");
+        setSourceFilesMulti([]);
       } else {
         const stillExists = files.some((f) => f?.file_name === sourceFile);
         if (!stillExists) setSourceFile(files[0].file_name);
+        setSourceFilesMulti((prev) => {
+          const available = new Set(files.map((f) => String(f.file_name)));
+          const next = prev.filter((x) => available.has(x));
+          if (next.length > 0) return next;
+          return [String(files[0].file_name)];
+        });
       }
 
       setUiStatus("success", "Load JSON files", `Files available: ${files.length}`);
@@ -525,6 +534,52 @@ export default function App() {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+      });
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`POST ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", "Async upload", `HTTP ${res.status}. Open technical details below.`);
+        return;
+      }
+
+      const jobId = String(data?.job_id || "").trim();
+      if (!jobId) {
+        setUiStatus("error", "Async upload", "job_id is missing in response.");
+        return;
+      }
+      setActiveUpdateJobId(jobId);
+      stopUpdatePolling();
+      setUiStatus("loading", "Async upload", `Queued. Job: ${jobId}`);
+      await pollUploadJob(jobId);
+      updatePollTimerRef.current = setInterval(() => {
+        pollUploadJob(jobId);
+      }, 2000);
+    } catch (e) {
+      setUiStatus("error", "Async upload", String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function uploadSelectedFiles() {
+    if (!sourceFilesMulti.length) {
+      setUiStatus("error", "Upload selected files", "Select one or more source files first.");
+      return;
+    }
+    if (!window.confirm(`Upload all items from ${sourceFilesMulti.length} selected file(s)?`)) return;
+    const url = withAccount(`${endpoints.uploadManyAsync}?limit=0`);
+    setLoading(true);
+    setRawOutput("");
+    setUiStatus("loading", "Async upload", `Starting async upload for ${sourceFilesMulti.length} file(s)...`);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_files: sourceFilesMulti }),
       });
       const text = await res.text();
       const data = parseResponseBody(text);
@@ -697,6 +752,7 @@ export default function App() {
                   setAccountMode(e.target.value);
                   setJsonFiles([]);
                   setSourceFile("");
+                  setSourceFilesMulti([]);
                   setJsonItems([]);
                   setSelectedIds([]);
                 }}
@@ -736,6 +792,25 @@ export default function App() {
               {jsonFiles.length === 0 ? <option value="">No files</option> : null}
               {jsonFiles.map((file) => (
                 <option key={file.file_name} value={file.file_name}>
+                  {file.file_name} ({file.item_count})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="label grow">
+            Source files (multi)
+            <select
+              className="input"
+              multiple
+              value={sourceFilesMulti}
+              onChange={(e) => {
+                const selected = Array.from(e.target.selectedOptions).map((opt) => opt.value);
+                setSourceFilesMulti(selected);
+              }}
+              disabled={loading || jsonFiles.length === 0}
+            >
+              {jsonFiles.map((file) => (
+                <option key={`m-${file.file_name}`} value={file.file_name}>
                   {file.file_name} ({file.item_count})
                 </option>
               ))}
@@ -845,6 +920,9 @@ export default function App() {
           </button>
           <button className="btn warning" disabled={loading || !sourceFile} onClick={uploadAllFromSelectedFile}>
             Upload all from selected file
+          </button>
+          <button className="btn warning" disabled={loading || !sourceFilesMulti.length} onClick={uploadSelectedFiles}>
+            Upload selected files ({sourceFilesMulti.length})
           </button>
           <button className="btn warning" disabled={loading || !sourceFile} onClick={updateAllFromSelectedFile}>
             Update all from selected file

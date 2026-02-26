@@ -1083,6 +1083,159 @@ def _run_items_upload_job(job_id: str, limit: int, source_file: str | None, acco
     )
 
 
+async def _run_items_upload_many(
+    source_files: List[str],
+    limit: int = 0,
+    account: str | None = None,
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
+) -> Dict[str, Any]:
+    normalized_files: List[str] = []
+    seen: set[str] = set()
+    for raw in source_files:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        normalized_files.append(name)
+        seen.add(name)
+
+    if not normalized_files:
+        raise HTTPException(status_code=400, detail="source_files is empty")
+
+    files_total = len(normalized_files)
+    files_completed = 0
+    total_success = 0
+    total_failed = 0
+    details: List[Dict[str, Any]] = []
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "prepared",
+                "files_total": files_total,
+                "files_completed": 0,
+                "success": 0,
+                "failed": 0,
+            }
+        )
+
+    for idx, source_file in enumerate(normalized_files, start=1):
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "uploading_file",
+                    "files_total": files_total,
+                    "files_completed": files_completed,
+                    "current_file_index": idx,
+                    "current_file": source_file,
+                    "success": total_success,
+                    "failed": total_failed,
+                }
+            )
+
+        file_result = await _run_items_upload(
+            limit=limit,
+            source_file=source_file,
+            account=account,
+            progress_cb=None,
+        )
+        file_success = sum(1 for r in file_result if r.get("success"))
+        file_failed = sum(1 for r in file_result if not r.get("success"))
+        total_success += file_success
+        total_failed += file_failed
+        files_completed += 1
+        details.append(
+            {
+                "source_file": source_file,
+                "requested": len(file_result),
+                "success": file_success,
+                "failed": file_failed,
+                "details": file_result,
+            }
+        )
+
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "uploading_file",
+                    "files_total": files_total,
+                    "files_completed": files_completed,
+                    "current_file_index": idx,
+                    "current_file": source_file,
+                    "success": total_success,
+                    "failed": total_failed,
+                }
+            )
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "files_total": files_total,
+                "files_completed": files_completed,
+                "success": total_success,
+                "failed": total_failed,
+            }
+        )
+
+    return {
+        "files_total": files_total,
+        "files_completed": files_completed,
+        "success": total_success,
+        "failed": total_failed,
+        "details": details,
+    }
+
+
+def _run_items_upload_many_job(job_id: str, source_files: List[str], limit: int, account: str | None) -> None:
+    _set_upload_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+        },
+    )
+
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_upload_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
+    try:
+        result = asyncio.run(
+            _run_items_upload_many(
+                source_files=source_files,
+                limit=limit,
+                account=account,
+                progress_cb=progress_cb,
+            )
+        )
+    except Exception as exc:
+        _set_upload_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+                "progress": {"phase": "failed"},
+            },
+        )
+        return
+
+    _set_upload_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+            "progress": {
+                "phase": "completed",
+                "files_total": result.get("files_total", 0),
+                "files_completed": result.get("files_completed", 0),
+                "success": result.get("success", 0),
+                "failed": result.get("failed", 0),
+            },
+        },
+    )
+
+
 @router.post("/upload_async")
 def items_upload_async(
     background_tasks: BackgroundTasks,
@@ -1104,6 +1257,46 @@ def items_upload_async(
         },
     )
     background_tasks.add_task(_run_items_upload_job, job_id, limit, source_file, account)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/upload_async/{job_id}",
+    }
+
+
+@router.post("/upload_many_async")
+def items_upload_many_async(
+    background_tasks: BackgroundTasks,
+    source_files: List[str] = Body(..., embed=True),
+    limit: int = 0,
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    _account_mode(account)
+    normalized_files: List[str] = []
+    seen: set[str] = set()
+    for raw in source_files:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        normalized_files.append(name)
+        seen.add(name)
+    if not normalized_files:
+        raise HTTPException(status_code=400, detail="source_files is empty")
+
+    job_id = uuid4().hex
+    _set_upload_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "limit": limit,
+            "source_files": normalized_files,
+            "account": account,
+            "mode": "many_files",
+        },
+    )
+    background_tasks.add_task(_run_items_upload_many_job, job_id, normalized_files, limit, account)
     return {
         "job_id": job_id,
         "status": "queued",
