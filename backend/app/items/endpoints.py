@@ -452,6 +452,26 @@ def _delete_one_item_number_by_item_ids(
     }
 
 
+def _split_item_numbers_by_duplicates(
+    cfg: ApiConfig,
+    item_numbers: List[str],
+    cache: Dict[str, Any],
+) -> Dict[str, Any]:
+    mapping = _get_item_number_to_ids_map(cfg=cfg, cache=cache)
+    unique_numbers: List[str] = []
+    duplicate_numbers: List[str] = []
+    for number in item_numbers:
+        ids = mapping.get(number) or []
+        if len(ids) > 1:
+            duplicate_numbers.append(number)
+        else:
+            unique_numbers.append(number)
+    return {
+        "unique_numbers": unique_numbers,
+        "duplicate_numbers": duplicate_numbers,
+    }
+
+
 def _send_update_chunk_with_duplicate_cleanup(
     chunk: List[Dict[str, Any]],
     cfg: ApiConfig,
@@ -1337,6 +1357,18 @@ async def items_upload(
 def delete_item_by_item_number(item_number: str, account: str | None = Query(default=None)) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
+    cache: Dict[str, Any] = {}
+    split = _split_item_numbers_by_duplicates(cfg=cfg, item_numbers=[item_number], cache=cache)
+    if split["duplicate_numbers"]:
+        fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=item_number, cache=cache)
+        return {
+            "item_number": item_number,
+            "account": account_mode,
+            "method": "itemID",
+            "success": bool(fb.get("success")),
+            "fallback_detail": fb,
+        }
+
     xml_delete = build_item_delete(items=[{"itemNumber": item_number}], config=cfg)
     try:
         delete_resp_xml = send_request(xml_delete, config=cfg)
@@ -1345,6 +1377,7 @@ def delete_item_by_item_number(item_number: str, account: str | None = Query(def
     resp = parse_item_delete_response(delete_resp_xml)
     resp["item_number"] = item_number
     resp["account"] = account_mode
+    resp["method"] = "itemNumber"
     return resp
 
 
@@ -1367,20 +1400,76 @@ def delete_items_by_item_number(
 
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
-    xml_delete = build_item_delete(
-        items=[{"itemNumber": item_number} for item_number in normalized],
-        config=cfg,
-    )
-    try:
-        delete_resp_xml = send_request(xml_delete, config=cfg)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    cache: Dict[str, Any] = {}
+    split = _split_item_numbers_by_duplicates(cfg=cfg, item_numbers=normalized, cache=cache)
+    unique_numbers: List[str] = split["unique_numbers"]
+    duplicate_numbers: List[str] = split["duplicate_numbers"]
 
-    resp = parse_item_delete_response(delete_resp_xml)
-    resp["item_numbers"] = normalized
-    resp["requested"] = len(normalized)
-    resp["account"] = account_mode
-    return resp
+    details: List[Dict[str, Any]] = []
+    deleted = 0
+    failed = 0
+
+    if unique_numbers:
+        xml_delete = build_item_delete(
+            items=[{"itemNumber": item_number} for item_number in unique_numbers],
+            config=cfg,
+        )
+        try:
+            delete_resp_xml = send_request(xml_delete, config=cfg)
+            parsed = parse_item_delete_response(delete_resp_xml)
+        except Exception as exc:
+            parsed = {
+                "success": False,
+                "status": "error",
+                "message": str(exc),
+                "errors": [str(exc)],
+            }
+        parsed["method"] = "itemNumber"
+        parsed["requested_item_numbers"] = unique_numbers
+        details.append(parsed)
+
+        item_results = parsed.get("items") or []
+        if item_results:
+            batch_deleted = sum(1 for x in item_results if str(x.get("status") or "").lower() == "success")
+            batch_failed = sum(1 for x in item_results if str(x.get("status") or "").lower() == "failed")
+            deleted += batch_deleted
+            failed += batch_failed
+            unresolved = max(len(unique_numbers) - batch_deleted - batch_failed, 0)
+            failed += unresolved
+        elif parsed.get("success"):
+            deleted += len(unique_numbers)
+        else:
+            failed += len(unique_numbers)
+
+    if duplicate_numbers:
+        fallback_details: List[Dict[str, Any]] = []
+        recovered = 0
+        for number in duplicate_numbers:
+            fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=number, cache=cache)
+            fallback_details.append(fb)
+            if fb.get("success"):
+                recovered += 1
+            else:
+                failed += 1
+        deleted += recovered
+        details.append(
+            {
+                "method": "itemID",
+                "reason": "duplicate_itemNumber",
+                "requested_item_numbers": duplicate_numbers,
+                "recovered": recovered,
+                "details": fallback_details,
+            }
+        )
+
+    return {
+        "account": account_mode,
+        "requested": len(normalized),
+        "deleted": deleted,
+        "failed": failed,
+        "item_numbers": normalized,
+        "details": details,
+    }
 
 
 @router.post("/delete/by-source-file")
@@ -1431,9 +1520,12 @@ def delete_items_by_source_file(
     deleted = 0
     failed = 0
     fallback_cache: Dict[str, Any] = {}
+    split = _split_item_numbers_by_duplicates(cfg=cfg, item_numbers=item_numbers, cache=fallback_cache)
+    unique_numbers: List[str] = split["unique_numbers"]
+    duplicate_numbers: List[str] = split["duplicate_numbers"]
 
-    for i in range(0, len(item_numbers), batch_size):
-        chunk = item_numbers[i : i + batch_size]
+    for i in range(0, len(unique_numbers), batch_size):
+        chunk = unique_numbers[i : i + batch_size]
         xml_delete = build_item_delete(
             items=[{"itemNumber": item_number} for item_number in chunk],
             config=cfg,
@@ -1469,28 +1561,26 @@ def delete_items_by_source_file(
         else:
             failed += len(chunk)
 
-        ambiguous_numbers = _ambiguous_failed_item_numbers(parsed=parsed, requested_item_numbers=chunk)
-        if ambiguous_numbers:
-            recovered = 0
-            fallback_details: List[Dict[str, Any]] = []
-            for item_number in ambiguous_numbers:
-                fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=item_number, cache=fallback_cache)
-                fallback_details.append(fb)
-                if fb.get("success"):
-                    recovered += 1
-
-            if recovered:
-                deleted += recovered
-                failed = max(failed - recovered, 0)
-
-            details.append(
-                {
-                    "fallback": "delete_by_item_id_for_ambiguous_item_number",
-                    "requested_item_numbers": ambiguous_numbers,
-                    "recovered": recovered,
-                    "details": fallback_details,
-                }
-            )
+    if duplicate_numbers:
+        recovered = 0
+        duplicate_details: List[Dict[str, Any]] = []
+        for number in duplicate_numbers:
+            fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=number, cache=fallback_cache)
+            duplicate_details.append(fb)
+            if fb.get("success"):
+                recovered += 1
+            else:
+                failed += 1
+        deleted += recovered
+        details.append(
+            {
+                "method": "itemID",
+                "reason": "duplicate_itemNumber",
+                "requested_item_numbers": duplicate_numbers,
+                "recovered": recovered,
+                "details": duplicate_details,
+            }
+        )
 
     return {
         "account": account_mode,

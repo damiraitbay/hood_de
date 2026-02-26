@@ -71,6 +71,11 @@ def parse_item_delete_response(xml_str: str) -> Dict[str, Any]:
     """
     data = parse_generic_response(xml_str)
     root = ET.fromstring(xml_str)
+    item_errors = [_text(el) for el in root.findall(".//itemError") if _text(el)]
+    if item_errors:
+        data["errors"] = (data.get("errors") or []) + item_errors
+        if not data.get("message"):
+            data["message"] = item_errors[0]
 
     item_results: List[Dict[str, Any]] = []
     item_statuses: List[str] = []
