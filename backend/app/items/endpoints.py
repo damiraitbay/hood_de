@@ -1542,27 +1542,11 @@ def delete_items_by_source_file(
     details: List[Dict[str, Any]] = []
     deleted = 0
     failed = 0
-    cache: Dict[str, Any] = {}
-    mapping = _get_item_number_to_ids_map(cfg=cfg, cache=cache)
-    requested_item_ids: List[str] = []
-    seen_ids: set[str] = set()
-    missing_in_hood = 0
 
-    for number in item_numbers:
-        ids = mapping.get(number) or []
-        if not ids:
-            missing_in_hood += 1
-            continue
-        for item_id in ids:
-            if item_id in seen_ids:
-                continue
-            seen_ids.add(item_id)
-            requested_item_ids.append(item_id)
-
-    for i in range(0, len(requested_item_ids), batch_size):
-        chunk = requested_item_ids[i : i + batch_size]
+    for i in range(0, len(item_numbers), batch_size):
+        chunk = item_numbers[i : i + batch_size]
         xml_delete = build_item_delete(
-            items=[{"itemID": item_id} for item_id in chunk],
+            items=[{"itemNumber": item_number} for item_number in chunk],
             config=cfg,
         )
         try:
@@ -1574,14 +1558,14 @@ def delete_items_by_source_file(
                     "success": False,
                     "status": "error",
                     "message": str(exc),
-                    "requested_item_ids": chunk,
+                    "requested_item_numbers": chunk,
                 }
             )
             continue
 
         parsed = parse_item_delete_response(delete_resp_xml)
-        parsed["method"] = "itemID"
-        parsed["requested_item_ids"] = chunk
+        parsed["method"] = "itemNumber"
+        parsed["requested_item_numbers"] = chunk
         details.append(parsed)
 
         item_results = parsed.get("items") or []
@@ -1600,11 +1584,9 @@ def delete_items_by_source_file(
     return {
         "account": account_mode,
         "source_file": source_file,
-        "method": "itemID_only",
+        "method": "itemNumber_only",
         "found_in_file": len(source_items),
         "requested": len(item_numbers),
-        "requested_item_ids": len(requested_item_ids),
-        "missing_in_hood_by_item_number": missing_in_hood,
         "deleted": deleted,
         "failed": failed,
         "skipped_missing_item_number": skipped_missing,
