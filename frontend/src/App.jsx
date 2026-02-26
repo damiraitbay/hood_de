@@ -71,6 +71,7 @@ export default function App() {
       docs: `${base}/docs`,
       upload: `${base}/items/upload`,
       update: `${base}/items/update`,
+      updateAsync: `${base}/items/update_async`,
       status: `${base}/items/status`,
       json: `${base}/items/json`,
       jsonFiles: `${base}/items/json/files`,
@@ -305,8 +306,8 @@ export default function App() {
       return;
     }
     if (!window.confirm(`Update all items from selected file: ${sourceFile}?`)) return;
-    const url = withSource(`${endpoints.update}?limit=0`);
-    await call("POST", url, `Update all from selected file (${sourceFile})`);
+    const url = withSource(`${endpoints.updateAsync}?limit=0`);
+    await call("POST", url, `Start async update (${sourceFile})`);
   }
 
   async function uploadAllFromFolder() {

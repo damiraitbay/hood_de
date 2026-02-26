@@ -1,10 +1,13 @@
 import asyncio
 import json
 import re
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
 
 from app.config import (
     get_html_folder_for_account,
@@ -43,6 +46,8 @@ logger = get_logger("items")
 
 # Р¤Р°Р№Р», РєСѓРґР° Р±СѓРґРµРј СЃРєР»Р°РґС‹РІР°С‚СЊ С‚РѕРІР°СЂС‹, РЅРµ Р·Р°РіСЂСѓР·РёРІС€РёРµСЃСЏ РІ Hood
 FAILED_ITEMS_PATH = Path(settings.LOG_FOLDER).resolve() / "failed_items.json"
+UPDATE_JOBS: Dict[str, Dict[str, Any]] = {}
+UPDATE_JOBS_LOCK = threading.Lock()
 
 
 def _account_mode(account: str | None) -> str | None:
@@ -266,6 +271,86 @@ def _build_item_payload_from_norm(norm: Dict[str, Any], api_description: str) ->
         "mpn": norm.get("mpn"),
         "item_number": norm.get("item_number"),
         "country": norm.get("country"),
+    }
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _set_update_job(job_id: str, patch: Dict[str, Any]) -> None:
+    with UPDATE_JOBS_LOCK:
+        current = UPDATE_JOBS.get(job_id, {})
+        current.update(patch)
+        UPDATE_JOBS[job_id] = current
+
+
+def _run_items_update(limit: int, source_file: str | None, account: str | None) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
+
+    source_items = (
+        load_items_from_source_file(source_file, json_folder=json_folder)
+        if source_file
+        else load_all_items(json_folder=json_folder)
+    )
+
+    norms: List[Dict[str, Any]] = [normalize_item(raw) for raw in source_items]
+    if limit > 0:
+        norms = norms[:limit]
+
+    update_payloads: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    for norm in norms:
+        item_number = str(norm.get("item_number") or norm.get("ean") or "").strip()
+        if not item_number:
+            skipped.append(
+                {
+                    "reference_id": norm["reference_id"],
+                    "success": False,
+                    "error": "itemNumber/ean is empty",
+                }
+            )
+            continue
+
+        api_description = _resolve_description_for_api(norm, html_folder=html_folder)
+        payload = _build_item_payload_from_norm(norm, api_description)
+        payload["item_number"] = item_number
+        update_payloads.append(payload)
+
+    chunks = [update_payloads[i : i + 5] for i in range(0, len(update_payloads), 5)]
+    details: List[Dict[str, Any]] = []
+    updated = 0
+    failed = len(skipped)
+
+    for chunk in chunks:
+        xml_update = build_item_update(items=chunk, config=cfg)
+        chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
+        try:
+            resp_xml = send_request(xml_update, config=cfg)
+            parsed = parse_item_update_response(resp_xml)
+        except Exception as exc:
+            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+
+        parsed["item_numbers"] = chunk_ids
+        details.append(parsed)
+        if parsed.get("success"):
+            updated += len(chunk_ids)
+        else:
+            failed += len(chunk_ids)
+
+    return {
+        "requested": len(norms),
+        "prepared": len(update_payloads),
+        "updated": updated,
+        "failed": failed,
+        "account": account_mode,
+        "source_file": source_file,
+        "details": details,
+        "skipped": skipped,
     }
 
 
@@ -547,77 +632,82 @@ def items_update(
     Массовое обновление товаров из JSON в Hood через itemUpdate.
     limit=0 — обновить все товары из выбранного source_file (или из всей папки JSON).
     """
-    account_mode = _account_mode(account)
-    cfg = ApiConfig.from_env(account=account_mode)
-    json_folder = get_json_folder_for_account(account_mode)
-    html_folder = get_html_folder_for_account(account_mode)
-
     try:
-        source_items = (
-            load_items_from_source_file(source_file, json_folder=json_folder)
-            if source_file
-            else load_all_items(json_folder=json_folder)
-        )
+        return _run_items_update(limit=limit, source_file=source_file, account=account)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"JSON file not found: {source_file}")
 
-    norms: List[Dict[str, Any]] = [normalize_item(raw) for raw in source_items]
-    if limit > 0:
-        norms = norms[:limit]
 
-    update_payloads: List[Dict[str, Any]] = []
-    skipped: List[Dict[str, Any]] = []
+def _run_items_update_job(job_id: str, limit: int, source_file: str | None, account: str | None) -> None:
+    _set_update_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+        },
+    )
+    try:
+        result = _run_items_update(limit=limit, source_file=source_file, account=account)
+    except Exception as exc:
+        _set_update_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+            },
+        )
+        return
 
-    for norm in norms:
-        item_number = str(norm.get("item_number") or norm.get("ean") or "").strip()
-        if not item_number:
-            skipped.append(
-                {
-                    "reference_id": norm["reference_id"],
-                    "success": False,
-                    "error": "itemNumber/ean is empty",
-                }
-            )
-            continue
+    _set_update_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+        },
+    )
 
-        api_description = _resolve_description_for_api(norm, html_folder=html_folder)
-        payload = _build_item_payload_from_norm(norm, api_description)
-        payload["item_number"] = item_number
-        update_payloads.append(payload)
 
-    chunks = [update_payloads[i : i + 5] for i in range(0, len(update_payloads), 5)]
-    details: List[Dict[str, Any]] = []
-    updated = 0
-    failed = len(skipped)
+@router.post("/update_async")
+def items_update_async(
+    background_tasks: BackgroundTasks,
+    limit: int = 1,
+    source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    # Validate account early to fail fast on bad input.
+    _account_mode(account)
 
-    for chunk in chunks:
-        xml_update = build_item_update(items=chunk, config=cfg)
-        chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
-        try:
-            resp_xml = send_request(xml_update, config=cfg)
-            parsed = parse_item_update_response(resp_xml)
-        except Exception as exc:
-            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
-
-        parsed["item_numbers"] = chunk_ids
-        details.append(parsed)
-        if parsed.get("success"):
-            updated += len(chunk_ids)
-        else:
-            failed += len(chunk_ids)
-
+    job_id = uuid4().hex
+    _set_update_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "limit": limit,
+            "source_file": source_file,
+            "account": account,
+        },
+    )
+    background_tasks.add_task(_run_items_update_job, job_id, limit, source_file, account)
     return {
-        "requested": len(norms),
-        "prepared": len(update_payloads),
-        "updated": updated,
-        "failed": failed,
-        "account": account_mode,
-        "source_file": source_file,
-        "details": details,
-        "skipped": skipped,
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/update_async/{job_id}",
     }
+
+
+@router.get("/update_async/{job_id}")
+def items_update_async_status(job_id: str) -> Dict[str, Any]:
+    with UPDATE_JOBS_LOCK:
+        job = UPDATE_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 @router.get("/status")
