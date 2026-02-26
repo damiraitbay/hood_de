@@ -105,6 +105,46 @@ def parse_item_delete_response(xml_str: str) -> Dict[str, Any]:
     return data
 
 
+def parse_item_update_response(xml_str: str) -> Dict[str, Any]:
+    """
+    Парсит ответ itemUpdate.
+    У Hood часто нет глобального <status>, поэтому учитываем статусы в <items>/<item>.
+    """
+    data = parse_generic_response(xml_str)
+    root = ET.fromstring(xml_str)
+
+    item_results: List[Dict[str, Any]] = []
+    item_statuses: List[str] = []
+    for item in root.findall(".//item"):
+        item_number = _find_text(item, "itemNumber")
+        item_id = _find_text(item, "itemID")
+        item_status = _find_text(item, "status")
+        item_message = _find_text(item, "message")
+        if item_status:
+            item_statuses.append(item_status.lower())
+        if item_number or item_id or item_status or item_message:
+            item_results.append(
+                {
+                    "item_number": item_number or None,
+                    "item_id": item_id or None,
+                    "status": item_status or None,
+                    "message": item_message or None,
+                }
+            )
+
+    if item_results:
+        data["items"] = item_results
+
+    if "success" in item_statuses and "failed" not in item_statuses:
+        data["success"] = True
+    elif "failed" in item_statuses:
+        data["success"] = False
+    elif not data["errors"] and item_results:
+        data["success"] = True
+
+    return data
+
+
 def _item_element_to_dict(item: ET.Element) -> Dict[str, Any]:
     """Один элемент <item> в словарь."""
     out: Dict[str, Any] = {}

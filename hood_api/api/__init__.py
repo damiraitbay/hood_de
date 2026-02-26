@@ -3,6 +3,7 @@
 from .parsers import (
     parse_generic_response,
     parse_item_insert_response,
+    parse_item_update_response,
     parse_item_detail_response,
     parse_item_list_response,
     parse_item_status_response,
@@ -17,6 +18,7 @@ from .parsers import (
 __all__ = [
     "parse_generic_response",
     "parse_item_insert_response",
+    "parse_item_update_response",
     "parse_item_detail_response",
     "parse_item_list_response",
     "parse_item_status_response",

@@ -28,6 +28,7 @@ from hood_api.api.parsers import (
     parse_item_delete_response,
     parse_item_insert_response,
     parse_item_list_response,
+    parse_item_update_response,
 )
 from app.items.prices import load_prices
 from app.items.storage import (
@@ -514,7 +515,7 @@ def update_many(
         chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
         try:
             resp_xml = send_request(xml_update, config=cfg)
-            parsed = parse_generic_response(resp_xml)
+            parsed = parse_item_update_response(resp_xml)
         except Exception as exc:
             parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
 
@@ -596,7 +597,7 @@ def items_update(
         chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
         try:
             resp_xml = send_request(xml_update, config=cfg)
-            parsed = parse_generic_response(resp_xml)
+            parsed = parse_item_update_response(resp_xml)
         except Exception as exc:
             parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
 
@@ -1071,7 +1072,7 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
                 }
             )
             continue
-        parsed = parse_generic_response(resp_xml)
+        parsed = parse_item_update_response(resp_xml)
         parsed["items"] = [u.get("item_number") for u in chunk]
         all_responses.append(parsed)
 
