@@ -221,6 +221,8 @@ export default function App() {
       const filesTotal = Number(progress?.files_total || 0);
       const filesCompleted = Number(progress?.files_completed || 0);
       const isManyFiles = filesTotal > 0 || data?.mode === "many_files";
+      const fileProcessedItems = Number(progress?.file_processed_items || 0);
+      const fileTotalItems = Number(progress?.file_total_items || 0);
       const processedItems = Number(progress?.processed_items || 0);
       const totalItems = Number(progress?.total_items || data?.result?.length || 0);
       const successItems = Number(progress?.success || 0);
@@ -232,8 +234,12 @@ export default function App() {
         return;
       }
       if (statusValue === "running") {
+        const manyFilesText =
+          fileTotalItems > 0
+            ? `Running: files ${filesCompleted}/${filesTotal}, current file ${fileProcessedItems}/${fileTotalItems}, success ${successItems}, failed ${failedItems}`
+            : `Running: files ${filesCompleted}/${filesTotal}, success ${successItems}, failed ${failedItems}`;
         const mainText = isManyFiles
-          ? `Running: files ${filesCompleted}/${filesTotal}, success ${successItems}, failed ${failedItems}`
+          ? manyFilesText
           : `Running: ${processedItems}/${totalItems} processed, success ${successItems}, failed ${failedItems}`;
         setUiStatus("loading", "Async upload", `${mainText}${phase ? ` (${phase})` : ""}`);
         return;

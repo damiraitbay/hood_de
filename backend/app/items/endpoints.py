@@ -1103,6 +1103,7 @@ async def _run_items_upload_many(
 
     files_total = len(normalized_files)
     files_completed = 0
+    total_processed = 0
     total_success = 0
     total_failed = 0
     details: List[Dict[str, Any]] = []
@@ -1113,6 +1114,7 @@ async def _run_items_upload_many(
                 "phase": "prepared",
                 "files_total": files_total,
                 "files_completed": 0,
+                "processed_items": 0,
                 "success": 0,
                 "failed": 0,
             }
@@ -1127,8 +1129,31 @@ async def _run_items_upload_many(
                     "files_completed": files_completed,
                     "current_file_index": idx,
                     "current_file": source_file,
+                    "processed_items": total_processed,
                     "success": total_success,
                     "failed": total_failed,
+                }
+            )
+
+        def file_progress_cb(file_progress: Dict[str, Any]) -> None:
+            if progress_cb is None:
+                return
+            file_total = int(file_progress.get("total_items") or 0)
+            file_processed = int(file_progress.get("processed_items") or 0)
+            file_success = int(file_progress.get("success") or 0)
+            file_failed = int(file_progress.get("failed") or 0)
+            progress_cb(
+                {
+                    "phase": "uploading_file",
+                    "files_total": files_total,
+                    "files_completed": files_completed,
+                    "current_file_index": idx,
+                    "current_file": source_file,
+                    "file_total_items": file_total,
+                    "file_processed_items": file_processed,
+                    "processed_items": total_processed + file_processed,
+                    "success": total_success + file_success,
+                    "failed": total_failed + file_failed,
                 }
             )
 
@@ -1136,10 +1161,12 @@ async def _run_items_upload_many(
             limit=limit,
             source_file=source_file,
             account=account,
-            progress_cb=None,
+            progress_cb=file_progress_cb,
         )
         file_success = sum(1 for r in file_result if r.get("success"))
         file_failed = sum(1 for r in file_result if not r.get("success"))
+        file_processed = len(file_result)
+        total_processed += file_processed
         total_success += file_success
         total_failed += file_failed
         files_completed += 1
@@ -1161,6 +1188,9 @@ async def _run_items_upload_many(
                     "files_completed": files_completed,
                     "current_file_index": idx,
                     "current_file": source_file,
+                    "file_total_items": file_processed,
+                    "file_processed_items": file_processed,
+                    "processed_items": total_processed,
                     "success": total_success,
                     "failed": total_failed,
                 }
@@ -1172,6 +1202,7 @@ async def _run_items_upload_many(
                 "phase": "completed",
                 "files_total": files_total,
                 "files_completed": files_completed,
+                "processed_items": total_processed,
                 "success": total_success,
                 "failed": total_failed,
             }
@@ -1180,6 +1211,7 @@ async def _run_items_upload_many(
     return {
         "files_total": files_total,
         "files_completed": files_completed,
+        "processed_items": total_processed,
         "success": total_success,
         "failed": total_failed,
         "details": details,
