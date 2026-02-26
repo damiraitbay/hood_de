@@ -329,14 +329,18 @@ def _cleanup_duplicate_item_number(
     item_number: str,
     cache: Dict[str, Any],
 ) -> Dict[str, Any]:
-    _ = cache
+    cleaned_map = cache.setdefault("cleaned_item_numbers", {})
+    if item_number in cleaned_map:
+        return cleaned_map[item_number]
     delete_resp = _delete_by_item_number(cfg=cfg, item_number=item_number)
-    return {
+    result = {
         "item_number": item_number,
         "delete_by_item_number": True,
         "delete_success": bool(delete_resp.get("success")),
         "delete_response": delete_resp,
     }
+    cleaned_map[item_number] = result
+    return result
 
 
 def _send_update_chunk_with_duplicate_cleanup(
@@ -356,13 +360,31 @@ def _send_update_chunk_with_duplicate_cleanup(
     if parsed.get("success"):
         return {"details": [parsed], "updated": len(chunk_numbers), "failed": 0}
 
-    if not _is_item_number_ambiguous_error(parsed):
-        return {"details": [parsed], "updated": 0, "failed": len(chunk_numbers)}
-
     details: List[Dict[str, Any]] = [parsed]
     updated = 0
     failed = 0
 
+    # Fast path for non-ambiguous failures: count per-item results if provided.
+    if not _is_item_number_ambiguous_error(parsed):
+        items = parsed.get("items") or []
+        if items:
+            by_number: Dict[str, str] = {}
+            for it in items:
+                num = str(it.get("item_number") or "").strip()
+                status = str(it.get("status") or "").lower()
+                if num:
+                    by_number[num] = status
+            for num in chunk_numbers:
+                status = by_number.get(num, "")
+                if status == "success":
+                    updated += 1
+                else:
+                    failed += 1
+        else:
+            failed = len(chunk_numbers)
+        return {"details": details, "updated": updated, "failed": failed}
+
+    # Ambiguous case: isolate bad rows with single-item retries.
     for payload in chunk:
         item_number = str(payload.get("item_number") or payload.get("ean") or "").strip()
         if not item_number:
@@ -378,6 +400,24 @@ def _send_update_chunk_with_duplicate_cleanup(
             )
             continue
 
+        single_xml = build_item_update(items=[payload], config=cfg)
+        try:
+            single_resp_xml = send_request(single_xml, config=cfg)
+            single_parsed = parse_item_update_response(single_resp_xml)
+        except Exception as exc:
+            single_parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+        single_parsed["item_numbers"] = [item_number]
+
+        if single_parsed.get("success"):
+            details.append(single_parsed)
+            updated += 1
+            continue
+
+        if not _is_item_number_ambiguous_error(single_parsed):
+            details.append(single_parsed)
+            failed += 1
+            continue
+
         cleanup_info = _cleanup_duplicate_item_number(cfg=cfg, item_number=item_number, cache=cache)
         retry_xml = build_item_update(items=[payload], config=cfg)
         try:
@@ -389,6 +429,7 @@ def _send_update_chunk_with_duplicate_cleanup(
         retry_parsed["item_numbers"] = [item_number]
         retry_parsed["retry_after_duplicate_cleanup"] = True
         retry_parsed["duplicate_cleanup"] = cleanup_info
+        details.append(single_parsed)
         details.append(retry_parsed)
         if retry_parsed.get("success"):
             updated += 1
