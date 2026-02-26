@@ -282,11 +282,22 @@ def normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     # ???????????: ?????????? pictureurls (??????) ??? PictureURL (????)
     images = []
-    if isinstance(raw.get("pictureurls"), list):
-        images = [str(u).strip() for u in raw["pictureurls"] if str(u or "").strip()]
-    elif raw.get("PictureURL"):
-        single = str(raw["PictureURL"]).strip()
-        images = [single] if single else []
+    seen_images = set()
+
+    def add_image(url: Any) -> None:
+        value = str(url or "").strip()
+        if not value or value in seen_images:
+            return
+        seen_images.add(value)
+        images.append(value)
+
+    # In many feeds, the "main" image is stored in PictureURL.
+    add_image(raw.get("PictureURL"))
+
+    pictureurls = raw.get("pictureurls")
+    if isinstance(pictureurls, list):
+        for u in pictureurls:
+            add_image(u)
 
     # CategoryID должна быть валидной по справочнику Hood.
     # Если исходная категория невалидна/пустая, подбираем по названию+описанию.
