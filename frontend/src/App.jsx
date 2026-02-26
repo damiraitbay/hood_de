@@ -270,9 +270,12 @@ export default function App() {
 
       const statusValue = String(data?.status || "");
       const progress = data?.progress || {};
-      const requested = Number(progress?.requested || 0);
-      const deleted = Number(progress?.deleted || 0);
-      const failed = Number(progress?.failed || 0);
+      const requestedRaw = progress?.requested ?? data?.result?.requested ?? null;
+      const deletedRaw = progress?.deleted ?? data?.result?.deleted ?? null;
+      const failedRaw = progress?.failed ?? data?.result?.failed ?? null;
+      const requested = requestedRaw == null ? null : Number(requestedRaw);
+      const deleted = deletedRaw == null ? null : Number(deletedRaw);
+      const failed = failedRaw == null ? null : Number(failedRaw);
       const phase = String(progress?.phase || "");
 
       if (statusValue === "queued") {
@@ -280,15 +283,19 @@ export default function App() {
         return;
       }
       if (statusValue === "running") {
-        setUiStatus(
-          "loading",
-          "Async delete",
-          `Running: requested ${requested}, deleted ${deleted}, failed ${failed}${phase ? ` (${phase})` : ""}`
-        );
+        const metrics =
+          requested == null && deleted == null && failed == null
+            ? "Running: processing..."
+            : `Running: requested ${requested ?? "-"}, deleted ${deleted ?? "-"}, failed ${failed ?? "-"}`;
+        setUiStatus("loading", "Async delete", `${metrics}${phase ? ` (${phase})` : ""}`);
         return;
       }
       if (statusValue === "completed") {
-        setUiStatus("success", "Async delete", `Completed: deleted ${deleted}, failed ${failed}, requested ${requested}`);
+        setUiStatus(
+          "success",
+          "Async delete",
+          `Completed: deleted ${deleted ?? 0}, failed ${failed ?? 0}, requested ${requested ?? 0}`
+        );
         stopUpdatePolling();
         return;
       }

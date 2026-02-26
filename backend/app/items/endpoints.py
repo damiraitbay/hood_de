@@ -1504,11 +1504,11 @@ def delete_items_by_item_number(
     }
 
 
-@router.post("/delete/by-source-file")
-def delete_items_by_source_file(
+def _run_delete_by_source_file(
     source_file: str = Query(...),
     account: str | None = Query(default=None),
     batch_size: int = Query(default=200, ge=1, le=500),
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
@@ -1537,6 +1537,16 @@ def delete_items_by_source_file(
         item_numbers.append(item_number)
 
     if not item_numbers:
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "completed",
+                    "requested": 0,
+                    "processed": 0,
+                    "deleted": 0,
+                    "failed": 0,
+                }
+            )
         return {
             "account": account_mode,
             "source_file": source_file,
@@ -1551,6 +1561,18 @@ def delete_items_by_source_file(
     details: List[Dict[str, Any]] = []
     deleted = 0
     failed = 0
+    total_requested = len(item_numbers)
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "prepared",
+                "requested": total_requested,
+                "processed": 0,
+                "deleted": 0,
+                "failed": 0,
+            }
+        )
 
     for i in range(0, len(item_numbers), batch_size):
         chunk = item_numbers[i : i + batch_size]
@@ -1570,6 +1592,16 @@ def delete_items_by_source_file(
                     "requested_item_numbers": chunk,
                 }
             )
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "phase": "deleting",
+                        "requested": total_requested,
+                        "processed": min(i + len(chunk), total_requested),
+                        "deleted": deleted,
+                        "failed": failed,
+                    }
+                )
             continue
 
         parsed = parse_item_delete_response(delete_resp_xml)
@@ -1590,6 +1622,28 @@ def delete_items_by_source_file(
         else:
             failed += len(chunk)
 
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "deleting",
+                    "requested": total_requested,
+                    "processed": min(i + len(chunk), total_requested),
+                    "deleted": deleted,
+                    "failed": failed,
+                }
+            )
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "requested": total_requested,
+                "processed": total_requested,
+                "deleted": deleted,
+                "failed": failed,
+            }
+        )
+
     return {
         "account": account_mode,
         "source_file": source_file,
@@ -1603,6 +1657,15 @@ def delete_items_by_source_file(
     }
 
 
+@router.post("/delete/by-source-file")
+def delete_items_by_source_file(
+    source_file: str = Query(...),
+    account: str | None = Query(default=None),
+    batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    return _run_delete_by_source_file(source_file=source_file, account=account, batch_size=batch_size)
+
+
 def _run_delete_source_file_job(job_id: str, source_file: str, account: str | None, batch_size: int) -> None:
     _set_delete_job(
         job_id,
@@ -1612,8 +1675,16 @@ def _run_delete_source_file_job(job_id: str, source_file: str, account: str | No
             "progress": {"phase": "running"},
         },
     )
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_delete_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
     try:
-        result = delete_items_by_source_file(source_file=source_file, account=account, batch_size=batch_size)
+        result = _run_delete_by_source_file(
+            source_file=source_file,
+            account=account,
+            batch_size=batch_size,
+            progress_cb=progress_cb,
+        )
     except Exception as exc:
         _set_delete_job(
             job_id,
@@ -1651,11 +1722,15 @@ def _run_delete_duplicates_job(job_id: str, account: str | None, keep_one: bool,
             "progress": {"phase": "running"},
         },
     )
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_delete_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
     try:
-        result = delete_duplicate_ean_items(
+        result = _run_delete_duplicate_ean_items(
             account=account,
             keep_one=keep_one,
             delete_batch_size=delete_batch_size,
+            progress_cb=progress_cb,
         )
     except Exception as exc:
         _set_delete_job(
@@ -1694,11 +1769,15 @@ def _run_delete_all_job(job_id: str, account: str | None, item_status: str, dele
             "progress": {"phase": "running"},
         },
     )
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_delete_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
     try:
-        result = delete_all_items_from_hood(
+        result = _run_delete_all_items_from_hood(
             item_status=item_status,
             delete_batch_size=delete_batch_size,
             account=account,
+            progress_cb=progress_cb,
         )
     except Exception as exc:
         _set_delete_job(
@@ -1825,11 +1904,11 @@ def delete_job_status(job_id: str) -> Dict[str, Any]:
     return job
 
 
-@router.delete("/delete/all")
-def delete_all_items_from_hood(
+def _run_delete_all_items_from_hood(
     item_status: str = Query(default="running"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
@@ -1856,6 +1935,16 @@ def delete_all_items_from_hood(
         item_ids.append(item_id)
 
     if not item_ids:
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "completed",
+                    "requested": 0,
+                    "processed": 0,
+                    "deleted": 0,
+                    "failed": 0,
+                }
+            )
         logger.info(
             "Delete all done: item_status=%s, requested=0, deleted=0, failed=0, missing_item_id=%s",
             item_status,
@@ -1876,7 +1965,21 @@ def delete_all_items_from_hood(
     responses: List[Dict[str, Any]] = []
     deleted = 0
     failed = 0
+    total_requested = len(item_ids)
     total_batches = (len(item_ids) + delete_batch_size - 1) // delete_batch_size
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "prepared",
+                "requested": total_requested,
+                "processed": 0,
+                "deleted": 0,
+                "failed": 0,
+                "total_batches": total_batches,
+                "processed_batches": 0,
+            }
+        )
 
     for i in range(0, len(item_ids), delete_batch_size):
         chunk = item_ids[i : i + delete_batch_size]
@@ -1903,6 +2006,18 @@ def delete_all_items_from_hood(
                     "requested_item_ids": chunk,
                 }
             )
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "phase": "deleting",
+                        "requested": total_requested,
+                        "processed": min(i + len(chunk), total_requested),
+                        "deleted": deleted,
+                        "failed": failed,
+                        "total_batches": total_batches,
+                        "processed_batches": batch_num,
+                    }
+                )
             continue
 
         resp = parse_item_delete_response(delete_resp_xml)
@@ -1944,6 +2059,19 @@ def delete_all_items_from_hood(
                 len(chunk),
             )
 
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "deleting",
+                    "requested": total_requested,
+                    "processed": min(i + len(chunk), total_requested),
+                    "deleted": deleted,
+                    "failed": failed,
+                    "total_batches": total_batches,
+                    "processed_batches": batch_num,
+                }
+            )
+
     logger.info(
         "Delete all done: item_status=%s, requested=%s, deleted=%s, failed=%s, missing_item_id=%s",
         item_status,
@@ -1952,6 +2080,18 @@ def delete_all_items_from_hood(
         failed,
         missing_item_id,
     )
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "requested": total_requested,
+                "processed": total_requested,
+                "deleted": deleted,
+                "failed": failed,
+                "total_batches": total_batches,
+                "processed_batches": total_batches,
+            }
+        )
     return {
         "success": failed == 0,
         "item_status": item_status,
@@ -1965,11 +2105,24 @@ def delete_all_items_from_hood(
     }
 
 
-@router.post("/delete/duplicates-by-ean")
-def delete_duplicate_ean_items(
+@router.delete("/delete/all")
+def delete_all_items_from_hood(
+    item_status: str = Query(default="running"),
+    delete_batch_size: int = Query(default=200, ge=1, le=500),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    return _run_delete_all_items_from_hood(
+        item_status=item_status,
+        delete_batch_size=delete_batch_size,
+        account=account,
+    )
+
+
+def _run_delete_duplicate_ean_items(
     account: str | None = Query(default=None),
     keep_one: bool = Query(default=True),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
@@ -1984,6 +2137,16 @@ def delete_duplicate_ean_items(
             duplicate_groups[ean] = ids
 
     if not duplicate_groups:
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "completed",
+                    "requested": 0,
+                    "processed": 0,
+                    "deleted": 0,
+                    "failed": 0,
+                }
+            )
         return {
             "account": account_mode,
             "success": True,
@@ -2013,6 +2176,19 @@ def delete_duplicate_ean_items(
     details: List[Dict[str, Any]] = []
     deleted = 0
     failed = 0
+    total_requested = len(item_ids_to_delete)
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "prepared",
+                "requested": total_requested,
+                "processed": 0,
+                "deleted": 0,
+                "failed": 0,
+                "duplicate_ean_count": len(duplicate_groups),
+            }
+        )
 
     for i in range(0, len(item_ids_to_delete), delete_batch_size):
         chunk = item_ids_to_delete[i : i + delete_batch_size]
@@ -2032,6 +2208,17 @@ def delete_duplicate_ean_items(
                     "requested_item_ids": chunk,
                 }
             )
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "phase": "deleting",
+                        "requested": total_requested,
+                        "processed": min(i + len(chunk), total_requested),
+                        "deleted": deleted,
+                        "failed": failed,
+                        "duplicate_ean_count": len(duplicate_groups),
+                    }
+                )
             continue
 
         parsed = parse_item_delete_response(delete_resp_xml)
@@ -2052,6 +2239,30 @@ def delete_duplicate_ean_items(
         else:
             failed += len(chunk)
 
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "deleting",
+                    "requested": total_requested,
+                    "processed": min(i + len(chunk), total_requested),
+                    "deleted": deleted,
+                    "failed": failed,
+                    "duplicate_ean_count": len(duplicate_groups),
+                }
+            )
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "requested": total_requested,
+                "processed": total_requested,
+                "deleted": deleted,
+                "failed": failed,
+                "duplicate_ean_count": len(duplicate_groups),
+            }
+        )
+
     return {
         "account": account_mode,
         "success": failed == 0,
@@ -2063,6 +2274,19 @@ def delete_duplicate_ean_items(
         "plan": per_ean_plan,
         "details": details,
     }
+
+
+@router.post("/delete/duplicates-by-ean")
+def delete_duplicate_ean_items(
+    account: str | None = Query(default=None),
+    keep_one: bool = Query(default=True),
+    delete_batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    return _run_delete_duplicate_ean_items(
+        account=account,
+        keep_one=keep_one,
+        delete_batch_size=delete_batch_size,
+    )
 
 
 @router.post("/update_prices")
