@@ -294,6 +294,184 @@ def _set_upload_job(job_id: str, patch: Dict[str, Any]) -> None:
         UPLOAD_JOBS[job_id] = current
 
 
+def _is_item_number_ambiguous_error(parsed: Dict[str, Any]) -> bool:
+    haystack: List[str] = []
+    if parsed.get("message"):
+        haystack.append(str(parsed["message"]))
+    for err in parsed.get("errors") or []:
+        haystack.append(str(err))
+    for item in parsed.get("items") or []:
+        if item.get("message"):
+            haystack.append(str(item["message"]))
+    text = " ".join(haystack).lower()
+    return "artikelnummer" in text and "nicht eindeutig" in text
+
+
+def _load_item_number_index(cfg: ApiConfig, cache: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
+    if cache.get("item_number_index") is not None:
+        return cache["item_number_index"]
+    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
+    index: Dict[str, List[Dict[str, str]]] = {}
+    for it in hood_items:
+        item_number = str(it.get("itemNumber") or "").strip()
+        item_id = str(it.get("itemID") or "").strip()
+        if not item_number or not item_id:
+            continue
+        index.setdefault(item_number, []).append({"itemID": item_id, "referenceID": str(it.get("referenceID") or "")})
+    cache["item_number_index"] = index
+    return index
+
+
+def _delete_item_ids(cfg: ApiConfig, item_ids: List[str]) -> Dict[str, Any]:
+    if not item_ids:
+        return {"deleted_ids": [], "failed_ids": [], "details": []}
+
+    xml_delete = build_item_delete(items=[{"itemID": x} for x in item_ids], config=cfg)
+    try:
+        delete_resp_xml = send_request(xml_delete, config=cfg)
+    except Exception as exc:
+        return {
+            "deleted_ids": [],
+            "failed_ids": item_ids,
+            "details": [{"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}],
+        }
+
+    parsed = parse_item_delete_response(delete_resp_xml)
+    item_results = parsed.get("items") or []
+    if item_results:
+        deleted_ids: List[str] = []
+        failed_ids: List[str] = []
+        for it in item_results:
+            item_id = str(it.get("item_id") or "").strip()
+            status = str(it.get("status") or "").lower()
+            if not item_id:
+                continue
+            if status == "success":
+                deleted_ids.append(item_id)
+            elif status == "failed":
+                failed_ids.append(item_id)
+        unresolved = [x for x in item_ids if x not in deleted_ids and x not in failed_ids]
+        failed_ids.extend(unresolved)
+        return {"deleted_ids": deleted_ids, "failed_ids": failed_ids, "details": [parsed]}
+
+    if parsed.get("success"):
+        return {"deleted_ids": item_ids, "failed_ids": [], "details": [parsed]}
+    return {"deleted_ids": [], "failed_ids": item_ids, "details": [parsed]}
+
+
+def _cleanup_duplicate_item_number(
+    cfg: ApiConfig,
+    item_number: str,
+    cache: Dict[str, Any],
+) -> Dict[str, Any]:
+    index = _load_item_number_index(cfg=cfg, cache=cache)
+    rows = index.get(item_number) or []
+    uniq_ids: List[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        item_id = str(row.get("itemID") or "").strip()
+        if not item_id or item_id in seen:
+            continue
+        uniq_ids.append(item_id)
+        seen.add(item_id)
+
+    if len(uniq_ids) <= 1:
+        return {
+            "item_number": item_number,
+            "duplicates_found": max(len(uniq_ids) - 1, 0),
+            "deleted_count": 0,
+            "kept_item_id": uniq_ids[0] if uniq_ids else None,
+            "deleted_item_ids": [],
+            "failed_item_ids": [],
+        }
+
+    kept_item_id = uniq_ids[0]
+    to_delete = uniq_ids[1:]
+    deleted_item_ids: List[str] = []
+    failed_item_ids: List[str] = []
+    delete_details: List[Dict[str, Any]] = []
+
+    # itemDelete supports batches, keep chunks conservative.
+    for i in range(0, len(to_delete), 200):
+        chunk = to_delete[i : i + 200]
+        res = _delete_item_ids(cfg=cfg, item_ids=chunk)
+        deleted_item_ids.extend(res["deleted_ids"])
+        failed_item_ids.extend(res["failed_ids"])
+        delete_details.extend(res["details"])
+
+    remaining_ids = [kept_item_id] + [x for x in to_delete if x in failed_item_ids]
+    index[item_number] = [{"itemID": x, "referenceID": ""} for x in remaining_ids]
+
+    return {
+        "item_number": item_number,
+        "duplicates_found": len(uniq_ids) - 1,
+        "deleted_count": len(deleted_item_ids),
+        "kept_item_id": kept_item_id,
+        "deleted_item_ids": deleted_item_ids,
+        "failed_item_ids": failed_item_ids,
+        "delete_details": delete_details,
+    }
+
+
+def _send_update_chunk_with_duplicate_cleanup(
+    chunk: List[Dict[str, Any]],
+    cfg: ApiConfig,
+    cache: Dict[str, Any],
+) -> Dict[str, Any]:
+    chunk_numbers = [str(x.get("item_number") or x.get("ean") or "").strip() for x in chunk]
+    xml_update = build_item_update(items=chunk, config=cfg)
+    try:
+        resp_xml = send_request(xml_update, config=cfg)
+        parsed = parse_item_update_response(resp_xml)
+    except Exception as exc:
+        parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+
+    parsed["item_numbers"] = chunk_numbers
+    if parsed.get("success"):
+        return {"details": [parsed], "updated": len(chunk_numbers), "failed": 0}
+
+    if not _is_item_number_ambiguous_error(parsed):
+        return {"details": [parsed], "updated": 0, "failed": len(chunk_numbers)}
+
+    details: List[Dict[str, Any]] = [parsed]
+    updated = 0
+    failed = 0
+
+    for payload in chunk:
+        item_number = str(payload.get("item_number") or payload.get("ean") or "").strip()
+        if not item_number:
+            failed += 1
+            details.append(
+                {
+                    "success": False,
+                    "status": "failed",
+                    "item_numbers": [item_number],
+                    "message": "itemNumber/ean is empty",
+                    "errors": ["itemNumber/ean is empty"],
+                }
+            )
+            continue
+
+        cleanup_info = _cleanup_duplicate_item_number(cfg=cfg, item_number=item_number, cache=cache)
+        retry_xml = build_item_update(items=[payload], config=cfg)
+        try:
+            retry_resp_xml = send_request(retry_xml, config=cfg)
+            retry_parsed = parse_item_update_response(retry_resp_xml)
+        except Exception as exc:
+            retry_parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+
+        retry_parsed["item_numbers"] = [item_number]
+        retry_parsed["retry_after_duplicate_cleanup"] = True
+        retry_parsed["duplicate_cleanup"] = cleanup_info
+        details.append(retry_parsed)
+        if retry_parsed.get("success"):
+            updated += 1
+        else:
+            failed += 1
+
+    return {"details": details, "updated": updated, "failed": failed}
+
+
 def _run_items_update(
     limit: int,
     source_file: str | None,
@@ -341,6 +519,7 @@ def _run_items_update(
     failed = len(skipped)
     total_chunks = len(chunks)
     total_items = len(update_payloads)
+    duplicate_cleanup_cache: Dict[str, Any] = {}
 
     if progress_cb is not None:
         progress_cb(
@@ -359,19 +538,11 @@ def _run_items_update(
 
     for idx, chunk in enumerate(chunks, start=1):
         chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
-        xml_update = build_item_update(items=chunk, config=cfg)
-        try:
-            resp_xml = send_request(xml_update, config=cfg)
-            parsed = parse_item_update_response(resp_xml)
-        except Exception as exc:
-            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
-
-        parsed["item_numbers"] = chunk_ids
-        details.append(parsed)
-        if parsed.get("success"):
-            updated += len(chunk_ids)
-        else:
-            failed += len(chunk_ids)
+        chunk_result = _send_update_chunk_with_duplicate_cleanup(chunk=chunk, cfg=cfg, cache=duplicate_cleanup_cache)
+        details.extend(chunk_result["details"])
+        updated += int(chunk_result["updated"])
+        failed += int(chunk_result["failed"])
+        last_detail = chunk_result["details"][-1] if chunk_result["details"] else {}
 
         if progress_cb is not None:
             progress_cb(
@@ -384,10 +555,10 @@ def _run_items_update(
                     "updated": updated,
                     "failed": failed,
                     "last_chunk_item_numbers": chunk_ids,
-                    "last_chunk_success": bool(parsed.get("success")),
-                    "last_chunk_status": parsed.get("status"),
-                    "last_chunk_message": parsed.get("message"),
-                    "last_chunk_errors": parsed.get("errors") or [],
+                    "last_chunk_success": bool(last_detail.get("success")),
+                    "last_chunk_status": last_detail.get("status"),
+                    "last_chunk_message": last_detail.get("message"),
+                    "last_chunk_errors": last_detail.get("errors") or [],
                 }
             )
 
@@ -646,22 +817,13 @@ def update_many(
     details: List[Dict[str, Any]] = []
     updated = 0
     failed = len(skipped)
+    duplicate_cleanup_cache: Dict[str, Any] = {}
 
     for chunk in chunks:
-        xml_update = build_item_update(items=chunk, config=cfg)
-        chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
-        try:
-            resp_xml = send_request(xml_update, config=cfg)
-            parsed = parse_item_update_response(resp_xml)
-        except Exception as exc:
-            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
-
-        parsed["item_numbers"] = chunk_ids
-        details.append(parsed)
-        if parsed.get("success"):
-            updated += len(chunk_ids)
-        else:
-            failed += len(chunk_ids)
+        chunk_result = _send_update_chunk_with_duplicate_cleanup(chunk=chunk, cfg=cfg, cache=duplicate_cleanup_cache)
+        details.extend(chunk_result["details"])
+        updated += int(chunk_result["updated"])
+        failed += int(chunk_result["failed"])
 
     return {
         "requested": len(normalized_ids),
@@ -1318,15 +1480,11 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
     # itemUpdate РїСЂРёРЅРёРјР°РµС‚ РґРѕ 5 С‚РѕРІР°СЂРѕРІ Р·Р° СЂР°Р· вЂ” Р±СЊС‘Рј РЅР° С‡Р°РЅРєРё
     chunks = [updates[i : i + 5] for i in range(0, len(updates), 5)]
     all_responses: List[Dict[str, Any]] = []
+    duplicate_cleanup_cache: Dict[str, Any] = {}
 
     for chunk in chunks:
-        xml_body = build_item_update(chunk, config=cfg)
-        try:
-            response_xml = send_request(xml_body, config=cfg)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=str(exc))
-        parsed = parse_item_update_response(response_xml)
-        all_responses.append(parsed)
+        chunk_result = _send_update_chunk_with_duplicate_cleanup(chunk=chunk, cfg=cfg, cache=duplicate_cleanup_cache)
+        all_responses.extend(chunk_result["details"])
 
     return {
         "updated": len(updates),
