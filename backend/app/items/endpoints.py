@@ -307,56 +307,21 @@ def _is_item_number_ambiguous_error(parsed: Dict[str, Any]) -> bool:
     return "artikelnummer" in text and "nicht eindeutig" in text
 
 
-def _load_item_number_index(cfg: ApiConfig, cache: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
-    if cache.get("item_number_index") is not None:
-        return cache["item_number_index"]
-    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
-    index: Dict[str, List[Dict[str, str]]] = {}
-    for it in hood_items:
-        item_number = str(it.get("itemNumber") or "").strip()
-        item_id = str(it.get("itemID") or "").strip()
-        if not item_number or not item_id:
-            continue
-        index.setdefault(item_number, []).append({"itemID": item_id, "referenceID": str(it.get("referenceID") or "")})
-    cache["item_number_index"] = index
-    return index
-
-
-def _delete_item_ids(cfg: ApiConfig, item_ids: List[str]) -> Dict[str, Any]:
-    if not item_ids:
-        return {"deleted_ids": [], "failed_ids": [], "details": []}
-
-    xml_delete = build_item_delete(items=[{"itemID": x} for x in item_ids], config=cfg)
+def _delete_by_item_number(cfg: ApiConfig, item_number: str) -> Dict[str, Any]:
+    xml_delete = build_item_delete(items=[{"itemNumber": item_number}], config=cfg)
     try:
         delete_resp_xml = send_request(xml_delete, config=cfg)
     except Exception as exc:
         return {
-            "deleted_ids": [],
-            "failed_ids": item_ids,
-            "details": [{"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}],
+            "success": False,
+            "status": "error",
+            "message": str(exc),
+            "errors": [str(exc)],
+            "item_number": item_number,
         }
-
     parsed = parse_item_delete_response(delete_resp_xml)
-    item_results = parsed.get("items") or []
-    if item_results:
-        deleted_ids: List[str] = []
-        failed_ids: List[str] = []
-        for it in item_results:
-            item_id = str(it.get("item_id") or "").strip()
-            status = str(it.get("status") or "").lower()
-            if not item_id:
-                continue
-            if status == "success":
-                deleted_ids.append(item_id)
-            elif status == "failed":
-                failed_ids.append(item_id)
-        unresolved = [x for x in item_ids if x not in deleted_ids and x not in failed_ids]
-        failed_ids.extend(unresolved)
-        return {"deleted_ids": deleted_ids, "failed_ids": failed_ids, "details": [parsed]}
-
-    if parsed.get("success"):
-        return {"deleted_ids": item_ids, "failed_ids": [], "details": [parsed]}
-    return {"deleted_ids": [], "failed_ids": item_ids, "details": [parsed]}
+    parsed["item_number"] = item_number
+    return parsed
 
 
 def _cleanup_duplicate_item_number(
@@ -364,52 +329,13 @@ def _cleanup_duplicate_item_number(
     item_number: str,
     cache: Dict[str, Any],
 ) -> Dict[str, Any]:
-    index = _load_item_number_index(cfg=cfg, cache=cache)
-    rows = index.get(item_number) or []
-    uniq_ids: List[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        item_id = str(row.get("itemID") or "").strip()
-        if not item_id or item_id in seen:
-            continue
-        uniq_ids.append(item_id)
-        seen.add(item_id)
-
-    if len(uniq_ids) <= 1:
-        return {
-            "item_number": item_number,
-            "duplicates_found": max(len(uniq_ids) - 1, 0),
-            "deleted_count": 0,
-            "kept_item_id": uniq_ids[0] if uniq_ids else None,
-            "deleted_item_ids": [],
-            "failed_item_ids": [],
-        }
-
-    kept_item_id = uniq_ids[0]
-    to_delete = uniq_ids[1:]
-    deleted_item_ids: List[str] = []
-    failed_item_ids: List[str] = []
-    delete_details: List[Dict[str, Any]] = []
-
-    # itemDelete supports batches, keep chunks conservative.
-    for i in range(0, len(to_delete), 200):
-        chunk = to_delete[i : i + 200]
-        res = _delete_item_ids(cfg=cfg, item_ids=chunk)
-        deleted_item_ids.extend(res["deleted_ids"])
-        failed_item_ids.extend(res["failed_ids"])
-        delete_details.extend(res["details"])
-
-    remaining_ids = [kept_item_id] + [x for x in to_delete if x in failed_item_ids]
-    index[item_number] = [{"itemID": x, "referenceID": ""} for x in remaining_ids]
-
+    _ = cache
+    delete_resp = _delete_by_item_number(cfg=cfg, item_number=item_number)
     return {
         "item_number": item_number,
-        "duplicates_found": len(uniq_ids) - 1,
-        "deleted_count": len(deleted_item_ids),
-        "kept_item_id": kept_item_id,
-        "deleted_item_ids": deleted_item_ids,
-        "failed_item_ids": failed_item_ids,
-        "delete_details": delete_details,
+        "delete_by_item_number": True,
+        "delete_success": bool(delete_resp.get("success")),
+        "delete_response": delete_resp,
     }
 
 
