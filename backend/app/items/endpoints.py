@@ -466,13 +466,6 @@ def update_many(
         if str(it.get("ID", "")).strip()
     }
 
-    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
-    ref_to_item_id: Dict[str, str] = {
-        str(it.get("referenceID") or "").strip(): str(it.get("itemID") or "").strip()
-        for it in hood_items
-        if str(it.get("referenceID") or "").strip() and str(it.get("itemID") or "").strip()
-    }
-
     update_payloads: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
 
@@ -484,20 +477,20 @@ def update_many(
 
         norm = normalize_item(raw)
         api_description = _resolve_description_for_api(norm, html_folder=html_folder)
-        hood_item_id = ref_to_item_id.get(norm["reference_id"])
-        if not hood_item_id:
+        item_number = str(norm.get("item_number") or norm.get("ean") or "").strip()
+        if not item_number:
             skipped.append(
                 {
                     "item_id_local": item_id,
                     "reference_id": norm["reference_id"],
                     "success": False,
-                    "error": "Item with this reference_id not found in Hood",
+                    "error": "itemNumber/ean is empty",
                 }
             )
             continue
 
         payload = _build_item_payload_from_norm(norm, api_description)
-        payload["itemID"] = hood_item_id
+        payload["item_number"] = item_number
         update_payloads.append(payload)
 
     if not update_payloads:
@@ -518,14 +511,14 @@ def update_many(
 
     for chunk in chunks:
         xml_update = build_item_update(items=chunk, config=cfg)
-        chunk_ids = [str(x.get("itemID") or "") for x in chunk]
+        chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
         try:
             resp_xml = send_request(xml_update, config=cfg)
             parsed = parse_generic_response(resp_xml)
         except Exception as exc:
             parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
 
-        parsed["item_ids"] = chunk_ids
+        parsed["item_numbers"] = chunk_ids
         details.append(parsed)
         if parsed.get("success"):
             updated += len(chunk_ids)
@@ -573,31 +566,24 @@ def items_update(
     if limit > 0:
         norms = norms[:limit]
 
-    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
-    ref_to_item_id: Dict[str, str] = {
-        str(it.get("referenceID") or "").strip(): str(it.get("itemID") or "").strip()
-        for it in hood_items
-        if str(it.get("referenceID") or "").strip() and str(it.get("itemID") or "").strip()
-    }
-
     update_payloads: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
 
     for norm in norms:
-        hood_item_id = ref_to_item_id.get(norm["reference_id"])
-        if not hood_item_id:
+        item_number = str(norm.get("item_number") or norm.get("ean") or "").strip()
+        if not item_number:
             skipped.append(
                 {
                     "reference_id": norm["reference_id"],
                     "success": False,
-                    "error": "Item with this reference_id not found in Hood",
+                    "error": "itemNumber/ean is empty",
                 }
             )
             continue
 
         api_description = _resolve_description_for_api(norm, html_folder=html_folder)
         payload = _build_item_payload_from_norm(norm, api_description)
-        payload["itemID"] = hood_item_id
+        payload["item_number"] = item_number
         update_payloads.append(payload)
 
     chunks = [update_payloads[i : i + 5] for i in range(0, len(update_payloads), 5)]
@@ -607,14 +593,14 @@ def items_update(
 
     for chunk in chunks:
         xml_update = build_item_update(items=chunk, config=cfg)
-        chunk_ids = [str(x.get("itemID") or "") for x in chunk]
+        chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
         try:
             resp_xml = send_request(xml_update, config=cfg)
             parsed = parse_generic_response(resp_xml)
         except Exception as exc:
             parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
 
-        parsed["item_ids"] = chunk_ids
+        parsed["item_numbers"] = chunk_ids
         details.append(parsed)
         if parsed.get("success"):
             updated += len(chunk_ids)
@@ -1056,13 +1042,12 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
     for raw in server_items:
         norm = normalize_item(raw)
         ean = norm.get("ean")
-        ref = norm["reference_id"]
-        if not ean or ean not in prices or ref not in ref_to_item_id:
+        if not ean or ean not in prices:
             continue
         new_price = prices[ean]
         api_description = _resolve_description_for_api(norm, html_folder=html_folder)
         payload = _build_item_payload_from_norm(norm, api_description)
-        payload["itemID"] = ref_to_item_id[ref]
+        payload["item_number"] = str(norm.get("item_number") or ean)
         payload["price"] = str(new_price)
         updates.append(payload)
 
@@ -1082,12 +1067,12 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
                 {
                     "success": False,
                     "error": str(exc),
-                    "items": [u["itemID"] for u in chunk],
+                    "items": [u.get("item_number") for u in chunk],
                 }
             )
             continue
         parsed = parse_generic_response(resp_xml)
-        parsed["items"] = [u["itemID"] for u in chunk]
+        parsed["items"] = [u.get("item_number") for u in chunk]
         all_responses.append(parsed)
 
     return {

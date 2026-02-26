@@ -549,9 +549,6 @@ def build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = No
     parts = []
     for it in items:
         item_id = str(it.get("itemID") or "").strip()
-        if not item_id:
-            continue
-
         reference_id = str(it.get("reference_id") or "").strip()
         title = str(it.get("title") or it.get("itemName") or "").strip()
         description = str(it.get("description") or "").strip()
@@ -565,6 +562,10 @@ def build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = No
         ean = str(it.get("ean") or "").strip()
         mpn = str(it.get("mpn") or "").strip()
         item_number = str(it.get("item_number") or it.get("itemNumber") or "").strip()
+        if not item_number and ean:
+            item_number = ean
+        if not item_id and not item_number:
+            continue
         item_number_unique_flag = int(it.get("item_number_unique_flag") or 1)
         country = str(it.get("country") or "").strip()
         quantity = int(it.get("quantity") or 1)
@@ -601,7 +602,11 @@ def build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = No
             )
         product_properties_xml = "".join(properties_xml_parts)
 
-        lines = [f"<itemID>{_escape_text(item_id)}</itemID>"]
+        lines: List[str] = []
+        if item_id:
+            lines.append(f"<itemID>{_escape_text(item_id)}</itemID>")
+        elif item_number:
+            lines.append(f"<itemNumber>{_escape_text(item_number)}</itemNumber>")
         if reference_id:
             lines.append(f"<referenceID>{_escape_text(reference_id)}</referenceID>")
         lines.extend(
