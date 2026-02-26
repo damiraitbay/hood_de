@@ -246,6 +246,28 @@ def _find_raw_item_by_id(
     return None
 
 
+def _build_item_payload_from_norm(norm: Dict[str, Any], api_description: str) -> Dict[str, Any]:
+    return {
+        "reference_id": norm["reference_id"],
+        "title": norm["item_name"],
+        "itemName": norm["item_name"],
+        "description": api_description,
+        "price": norm["price"],
+        "quantity": norm["quantity"],
+        "categoryID": norm["category_id"],
+        "condition": norm["condition"],
+        "itemMode": norm["item_mode"],
+        "pay_options": ["paypal"],
+        "ship_methods": [{"name": "DHLPacket", "country": "nat", "value": "5.99"}],
+        "image_urls": norm.get("image_urls") or [],
+        "product_properties": norm.get("product_properties") or [],
+        "ean": norm.get("ean"),
+        "mpn": norm.get("mpn"),
+        "item_number": norm.get("item_number"),
+        "country": norm.get("country"),
+    }
+
+
 def _upload_one_by_id(item_id: str, source_file: str | None = None, account: str | None = None) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     json_folder = get_json_folder_for_account(account_mode)
@@ -263,22 +285,24 @@ def _upload_one_by_id(item_id: str, source_file: str | None = None, account: str
     norm = normalize_item(raw)
     api_description = _resolve_description_for_api(norm, html_folder=html_folder)
 
+    payload = _build_item_payload_from_norm(norm, api_description)
     xml_body = build_item_insert(
-        reference_id=norm["reference_id"],
-        title=norm["item_name"],
-        description=api_description,
-        price=norm["price"],
-        quantity=norm["quantity"],
-        category_id=norm["category_id"],
-        condition=norm["condition"],
-        item_mode=norm["item_mode"],
-        pay_options=["paypal"],
-        ship_methods=[{"name": "DHLPacket", "country": "nat", "value": "5.99"}],
-        image_urls=norm.get("image_urls") or [],
-        product_properties=norm.get("product_properties") or [],
-        ean=norm.get("ean"),
-        mpn=norm.get("mpn"),
-        item_number=norm.get("item_number"),
+        reference_id=payload["reference_id"],
+        title=payload["title"],
+        description=payload["description"],
+        price=payload["price"],
+        quantity=payload["quantity"],
+        category_id=payload["categoryID"],
+        condition=payload["condition"],
+        item_mode=payload["itemMode"],
+        pay_options=payload["pay_options"],
+        ship_methods=payload["ship_methods"],
+        image_urls=payload["image_urls"],
+        product_properties=payload["product_properties"],
+        ean=payload["ean"],
+        mpn=payload["mpn"],
+        item_number=payload["item_number"],
+        country=payload["country"],
         config=cfg,
     )
     try:
@@ -321,22 +345,24 @@ def validate_one(
     cfg = ApiConfig.from_env(account=account_mode)
     norm = normalize_item(raw)
     api_description = _resolve_description_for_api(norm, html_folder=html_folder)
+    payload = _build_item_payload_from_norm(norm, api_description)
     xml_body = build_item_validate(
-        reference_id=norm["reference_id"],
-        title=norm["item_name"],
-        description=api_description,
-        price=norm["price"],
-        quantity=norm["quantity"],
-        category_id=norm["category_id"],
-        condition=norm["condition"],
-        item_mode=norm["item_mode"],
-        pay_options=["paypal"],
-        ship_methods=[{"name": "DHLPacket", "country": "nat", "value": "5.99"}],
-        image_urls=norm.get("image_urls") or [],
-        product_properties=norm.get("product_properties") or [],
-        ean=norm.get("ean"),
-        mpn=norm.get("mpn"),
-        item_number=norm.get("item_number"),
+        reference_id=payload["reference_id"],
+        title=payload["title"],
+        description=payload["description"],
+        price=payload["price"],
+        quantity=payload["quantity"],
+        category_id=payload["categoryID"],
+        condition=payload["condition"],
+        item_mode=payload["itemMode"],
+        pay_options=payload["pay_options"],
+        ship_methods=payload["ship_methods"],
+        image_urls=payload["image_urls"],
+        product_properties=payload["product_properties"],
+        ean=payload["ean"],
+        mpn=payload["mpn"],
+        item_number=payload["item_number"],
+        country=payload["country"],
         config=cfg,
     )
     try:
@@ -400,6 +426,213 @@ def upload_many(
     return results
 
 
+@router.post("/update_one")
+def update_many(
+    item_ids: List[str] = Body(..., embed=True),
+    source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    normalized_ids: List[str] = []
+    seen: set[str] = set()
+    for raw in item_ids:
+        val = str(raw or "").strip()
+        if not val or val in seen:
+            continue
+        normalized_ids.append(val)
+        seen.add(val)
+
+    if not normalized_ids:
+        raise HTTPException(status_code=400, detail="item_ids is empty")
+
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
+
+    try:
+        source_items = (
+            load_items_from_source_file(source_file, json_folder=json_folder)
+            if source_file
+            else load_all_items(json_folder=json_folder)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"JSON file not found: {source_file}")
+
+    raw_by_id: Dict[str, Dict[str, Any]] = {
+        str(it.get("ID", "")).strip(): it
+        for it in source_items
+        if str(it.get("ID", "")).strip()
+    }
+
+    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
+    ref_to_item_id: Dict[str, str] = {
+        str(it.get("referenceID") or "").strip(): str(it.get("itemID") or "").strip()
+        for it in hood_items
+        if str(it.get("referenceID") or "").strip() and str(it.get("itemID") or "").strip()
+    }
+
+    update_payloads: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    for item_id in normalized_ids:
+        raw = raw_by_id.get(item_id)
+        if not raw:
+            skipped.append({"item_id_local": item_id, "success": False, "error": "Item not found in JSON by ID"})
+            continue
+
+        norm = normalize_item(raw)
+        api_description = _resolve_description_for_api(norm, html_folder=html_folder)
+        hood_item_id = ref_to_item_id.get(norm["reference_id"])
+        if not hood_item_id:
+            skipped.append(
+                {
+                    "item_id_local": item_id,
+                    "reference_id": norm["reference_id"],
+                    "success": False,
+                    "error": "Item with this reference_id not found in Hood",
+                }
+            )
+            continue
+
+        payload = _build_item_payload_from_norm(norm, api_description)
+        payload["itemID"] = hood_item_id
+        update_payloads.append(payload)
+
+    if not update_payloads:
+        return {
+            "requested": len(normalized_ids),
+            "prepared": 0,
+            "updated": 0,
+            "failed": len(skipped),
+            "account": account_mode,
+            "details": [],
+            "skipped": skipped,
+        }
+
+    chunks = [update_payloads[i : i + 5] for i in range(0, len(update_payloads), 5)]
+    details: List[Dict[str, Any]] = []
+    updated = 0
+    failed = len(skipped)
+
+    for chunk in chunks:
+        xml_update = build_item_update(items=chunk, config=cfg)
+        chunk_ids = [str(x.get("itemID") or "") for x in chunk]
+        try:
+            resp_xml = send_request(xml_update, config=cfg)
+            parsed = parse_generic_response(resp_xml)
+        except Exception as exc:
+            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+
+        parsed["item_ids"] = chunk_ids
+        details.append(parsed)
+        if parsed.get("success"):
+            updated += len(chunk_ids)
+        else:
+            failed += len(chunk_ids)
+
+    return {
+        "requested": len(normalized_ids),
+        "prepared": len(update_payloads),
+        "updated": updated,
+        "failed": failed,
+        "account": account_mode,
+        "details": details,
+        "skipped": skipped,
+    }
+
+
+@router.post("/update")
+def items_update(
+    limit: int = 1,
+    source_file: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    """
+    Массовое обновление товаров из JSON в Hood через itemUpdate.
+    limit=0 — обновить все товары из выбранного source_file (или из всей папки JSON).
+    """
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
+
+    try:
+        source_items = (
+            load_items_from_source_file(source_file, json_folder=json_folder)
+            if source_file
+            else load_all_items(json_folder=json_folder)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"JSON file not found: {source_file}")
+
+    norms: List[Dict[str, Any]] = [normalize_item(raw) for raw in source_items]
+    if limit > 0:
+        norms = norms[:limit]
+
+    hood_items = _load_all_hood_items(cfg=cfg, item_status="running", group_size=500)
+    ref_to_item_id: Dict[str, str] = {
+        str(it.get("referenceID") or "").strip(): str(it.get("itemID") or "").strip()
+        for it in hood_items
+        if str(it.get("referenceID") or "").strip() and str(it.get("itemID") or "").strip()
+    }
+
+    update_payloads: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    for norm in norms:
+        hood_item_id = ref_to_item_id.get(norm["reference_id"])
+        if not hood_item_id:
+            skipped.append(
+                {
+                    "reference_id": norm["reference_id"],
+                    "success": False,
+                    "error": "Item with this reference_id not found in Hood",
+                }
+            )
+            continue
+
+        api_description = _resolve_description_for_api(norm, html_folder=html_folder)
+        payload = _build_item_payload_from_norm(norm, api_description)
+        payload["itemID"] = hood_item_id
+        update_payloads.append(payload)
+
+    chunks = [update_payloads[i : i + 5] for i in range(0, len(update_payloads), 5)]
+    details: List[Dict[str, Any]] = []
+    updated = 0
+    failed = len(skipped)
+
+    for chunk in chunks:
+        xml_update = build_item_update(items=chunk, config=cfg)
+        chunk_ids = [str(x.get("itemID") or "") for x in chunk]
+        try:
+            resp_xml = send_request(xml_update, config=cfg)
+            parsed = parse_generic_response(resp_xml)
+        except Exception as exc:
+            parsed = {"success": False, "status": "error", "message": str(exc), "errors": [str(exc)]}
+
+        parsed["item_ids"] = chunk_ids
+        details.append(parsed)
+        if parsed.get("success"):
+            updated += len(chunk_ids)
+        else:
+            failed += len(chunk_ids)
+
+    return {
+        "requested": len(norms),
+        "prepared": len(update_payloads),
+        "updated": updated,
+        "failed": failed,
+        "account": account_mode,
+        "source_file": source_file,
+        "details": details,
+        "skipped": skipped,
+    }
+
+
 @router.get("/status")
 def items_status() -> Dict[str, Any]:
     """
@@ -435,22 +668,24 @@ def items_validate(account: str | None = Query(default=None)) -> List[Dict[str, 
     for raw in server_items:
         norm = normalize_item(raw)
         api_description = _resolve_description_for_api(norm, html_folder=html_folder)
+        payload = _build_item_payload_from_norm(norm, api_description)
         xml_body = build_item_validate(
-            reference_id=norm["reference_id"],
-            title=norm["item_name"],
-            description=api_description,
-            price=norm["price"],
-            quantity=norm["quantity"],
-            category_id=norm["category_id"],
-            condition=norm["condition"],
-            item_mode=norm["item_mode"],
-            pay_options=["paypal"],
-            ship_methods=[{"name": "DHLPacket", "country": "nat", "value": "5.99"}],
-            image_urls=norm.get("image_urls") or [],
-            product_properties=norm.get("product_properties") or [],
-            ean=norm.get("ean"),
-            mpn=norm.get("mpn"),
-            item_number=norm.get("item_number"),
+            reference_id=payload["reference_id"],
+            title=payload["title"],
+            description=payload["description"],
+            price=payload["price"],
+            quantity=payload["quantity"],
+            category_id=payload["categoryID"],
+            condition=payload["condition"],
+            item_mode=payload["itemMode"],
+            pay_options=payload["pay_options"],
+            ship_methods=payload["ship_methods"],
+            image_urls=payload["image_urls"],
+            product_properties=payload["product_properties"],
+            ean=payload["ean"],
+            mpn=payload["mpn"],
+            item_number=payload["item_number"],
+            country=payload["country"],
             config=cfg,
         )
         try:
@@ -514,22 +749,24 @@ async def items_upload(
         nonlocal processed_count
         async with semaphore:
             api_description = _resolve_description_for_api(norm, html_folder=html_folder)
+            payload = _build_item_payload_from_norm(norm, api_description)
             xml_body = build_item_insert(
-                reference_id=norm["reference_id"],
-                title=norm["item_name"],
-                description=api_description,
-                price=norm["price"],
-                quantity=norm["quantity"],
-                category_id=norm["category_id"],
-                condition=norm["condition"],
-                item_mode=norm["item_mode"],
-                pay_options=["paypal"],
-                ship_methods=[{"name": "DHLPacket", "country": "nat", "value": "5.99"}],
-                image_urls=norm.get("image_urls") or [],
-                product_properties=norm.get("product_properties") or [],
-                ean=norm.get("ean"),
-                mpn=norm.get("mpn"),
-                item_number=norm.get("item_number"),
+                reference_id=payload["reference_id"],
+                title=payload["title"],
+                description=payload["description"],
+                price=payload["price"],
+                quantity=payload["quantity"],
+                category_id=payload["categoryID"],
+                condition=payload["condition"],
+                item_mode=payload["itemMode"],
+                pay_options=payload["pay_options"],
+                ship_methods=payload["ship_methods"],
+                image_urls=payload["image_urls"],
+                product_properties=payload["product_properties"],
+                ean=payload["ean"],
+                mpn=payload["mpn"],
+                item_number=payload["item_number"],
+                country=payload["country"],
                 config=cfg,
             )
             try:
@@ -789,6 +1026,7 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
     cfg = ApiConfig.from_env(account=account_mode)
     price_sheet_path = get_price_sheet_for_account(account_mode)
     json_folder = get_json_folder_for_account(account_mode)
+    html_folder = get_html_folder_for_account(account_mode)
     prices = load_prices(price_sheet_path=price_sheet_path)  # EAN -> price
     server_items = load_all_items(json_folder=json_folder)
 
@@ -822,12 +1060,11 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
         if not ean or ean not in prices or ref not in ref_to_item_id:
             continue
         new_price = prices[ean]
-        updates.append(
-            {
-                "itemID": ref_to_item_id[ref],
-                "startPrice": float(new_price),
-            }
-        )
+        api_description = _resolve_description_for_api(norm, html_folder=html_folder)
+        payload = _build_item_payload_from_norm(norm, api_description)
+        payload["itemID"] = ref_to_item_id[ref]
+        payload["price"] = str(new_price)
+        updates.append(payload)
 
     if not updates:
         return {"updated": 0, "details": [], "message": "РќРµС‚ С‚РѕРІР°СЂРѕРІ РґР»СЏ РѕР±РЅРѕРІР»РµРЅРёСЏ С†РµРЅ"}

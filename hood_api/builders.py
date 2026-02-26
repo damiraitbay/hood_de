@@ -5,6 +5,8 @@
 
 import hashlib
 import html
+import os
+from datetime import datetime
 from xml.etree import ElementTree as ET
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +42,38 @@ DEFAULT_PRODUCT_CONTACT_RESPONSIBLE_PERSON = {
     "comment": "Verantwortlich fГјr eigene Inhalte der AEA GmbH & Co. KG gem. В§ 55 RStV",
 }
 
+DEFAULT_COMPANY_PROFILE = {
+    "item_manufacturer": "JV moebel",
+    "manufacturer": DEFAULT_PRODUCT_CONTACT_MANUFACTURER,
+    "responsible_person": DEFAULT_PRODUCT_CONTACT_RESPONSIBLE_PERSON,
+}
+
+XL_COMPANY_PROFILE = {
+    "item_manufacturer": "XL MOEBEL GmbH",
+    "manufacturer": {
+        "name": "XL MOEBEL GmbH",
+        "street": "Am Flugplatz 26",
+        "zip": "88483",
+        "city": "Burgrieden",
+        "country2DigitCode": "DE",
+        "state": "",
+        "phone": "+49 7392 93 78 445",
+        "email": "",
+        "comment": "Showroom, Deutschland. Kontaktieren Sie uns!",
+    },
+    "responsible_person": {
+        "name": "XL MOEBEL GmbH",
+        "street": "Am Flugplatz 26",
+        "zip": "88483",
+        "city": "Burgrieden",
+        "country2DigitCode": "DE",
+        "state": "",
+        "phone": "+49 7392 93 78 445",
+        "email": "",
+        "comment": "Showroom, Deutschland. Kontaktieren Sie uns!",
+    },
+}
+
 DEFAULT_SAFETY_INSTRUCTIONS = [
     "Nicht fГјr Kinder unter 3 Jahren geeignet.",
     "Benutzung unter unmittelbarer Aufsicht von Erwachsenen.",
@@ -49,6 +83,20 @@ DEFAULT_SAFETY_INSTRUCTIONS = [
     ),
     "Nur fuer den Hausgebrauch.",
 ]
+
+DELIVERY_DAYS_BY_COUNTRY: Dict[str, tuple[str, str]] = {
+    "CN": ("50", "70"),  # China
+    "TR": ("20", "50"),  # Turkey
+    "PL": ("15", "35"),  # Poland
+    "IT": ("15", "35"),  # Italy
+}
+
+COUNTRY_ALIASES: Dict[str, str] = {
+    "china": "CN",
+    "turkey": "TR",
+    "poland": "PL",
+    "italy": "IT",
+}
 
 
 def _escape_text(text: str) -> str:
@@ -90,9 +138,83 @@ def _safe_cdata(s: str) -> str:
     return str(s).strip().replace("]]>", "]]]]><![CDATA[>")
 
 
-def _build_default_product_contact_information_xml() -> str:
-    manufacturer = DEFAULT_PRODUCT_CONTACT_MANUFACTURER
-    responsible = DEFAULT_PRODUCT_CONTACT_RESPONSIBLE_PERSON
+def _to_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).strip().replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _format_decimal(value: float) -> str:
+    return f"{value:.2f}"
+
+
+def _process_uvp(price: float) -> float:
+    if price > 5000:
+        value = price * 1.10
+    elif 2500 <= price <= 4999:
+        value = price * 1.18
+    elif 1000 <= price <= 2499:
+        value = price * 1.25
+    else:
+        value = price * 1.35
+    return round(value, 2)
+
+
+def _normalize_country_code(country: str | None) -> str:
+    raw = str(country or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    if len(upper) == 2 and upper.isalpha():
+        return upper
+    return COUNTRY_ALIASES.get(raw.lower(), "")
+
+
+def _delivery_days(country: str | None) -> tuple[str, str]:
+    code = _normalize_country_code(country)
+    return DELIVERY_DAYS_BY_COUNTRY.get(code, ("20", "40"))
+
+
+def _build_short_desc(item_name: str, product_properties: Optional[List[Dict[str, Any]]]) -> str:
+    title = str(item_name or "").strip()
+    attrs: List[str] = []
+    for prop in product_properties or []:
+        name = str(prop.get("name", "")).strip()
+        value = prop.get("value")
+        if value is None:
+            continue
+        if isinstance(value, list):
+            value_str = ", ".join(str(v).strip() for v in value if str(v).strip())
+        else:
+            value_str = str(value).strip()
+        if not name or not value_str:
+            continue
+        attrs.append(f"{name}: {value_str}")
+        if len(attrs) >= 4:
+            break
+    text = title
+    if attrs:
+        text = f"{title}. " + " | ".join(attrs)
+    return text[:250]
+
+
+def _resolve_company_profile(config: ApiConfig) -> Dict[str, Any]:
+    user = str(config.user or "").strip().lower()
+    xl_user = str(os.environ.get("HOOD_API_XLUSER", "")).strip().lower()
+    if xl_user and user == xl_user:
+        return XL_COMPANY_PROFILE
+    if "xl" in user:
+        return XL_COMPANY_PROFILE
+    return DEFAULT_COMPANY_PROFILE
+
+
+def _build_default_product_contact_information_xml(profile: Dict[str, Any]) -> str:
+    manufacturer = profile["manufacturer"]
+    responsible = profile["responsible_person"]
     return (
         "<productContactInformation>"
         "<manufacturer>"
@@ -148,6 +270,7 @@ def _build_item_insert_or_validate(
     config: ApiConfig,
     function_name: str,
     item_number_unique_flag: int = 1,
+    country: Optional[str] = None,
 ) -> str:
     """РћР±С‰Р°СЏ СЃР±РѕСЂРєР° XML РґР»СЏ itemInsert Рё itemValidate (Hood API Doc 2.0.1: С‚Р° Р¶Рµ СЃС‚СЂСѓРєС‚СѓСЂР°)."""
     ph = _password_hash(config.password)
@@ -155,15 +278,23 @@ def _build_item_insert_or_validate(
     ship_list = ship_methods or [{"name": "DHLPacket", "country": "nat", "value": "5.99"}]
     title_ok = (title or "").strip()
     desc_ok = (description or "").strip()
-    price_ok = str(price or "").strip()
+    price_num = _to_float(price)
+    price_ok = _format_decimal(price_num)
     qty_ok = str(int(quantity)) if quantity is not None else "1"
     cat_ok = str(category_id or "").strip()
     cond_ok = (condition or "new").strip()
     mode_ok = (item_mode or "classic").strip()
 
-    pay_xml = "".join(f"<option>{o}</option>" for o in pay_opts)
+    company_profile = _resolve_company_profile(config)
+    manufacturer_name = str(company_profile.get("item_manufacturer") or DEFAULT_ITEM_MANUFACTURER)
+    now = datetime.now()
+    delivery_from, delivery_to = _delivery_days(country)
+    short_desc = _build_short_desc(title_ok, product_properties)
+    list_price = _format_decimal(_process_uvp(price_num))
+
+    pay_xml = "".join(f"<option>{_escape_text(str(o))}</option>" for o in pay_opts)
     ship_xml = "".join(
-        f'<shipmethod name="{m.get("name", "DHLPacket")}_{m.get("country", "nat")}"><value>{m.get("value", "0")}</value></shipmethod>'
+        f'<shipmethod name="{_escape_text(str(m.get("name", "DHLPacket")))}_{_escape_text(str(m.get("country", "nat")))}"><value>{_escape_text(str(m.get("value", "0")))}</value></shipmethod>'
         for m in ship_list
     )
     images_xml = "".join(f"<imageURL>{html.escape((u or '').strip())}</imageURL>" for u in (image_urls or []))
@@ -192,31 +323,43 @@ def _build_item_insert_or_validate(
     # РЎС‚СЂСѓРєС‚СѓСЂР° РїРѕР»СЏ С‚РѕРІР°СЂР° РєР°Рє РІ СЂР°Р±РѕС‡РµРј СЃРєСЂРёРїС‚Рµ: Рё startPrice, Рё price.
     item_lines = [
         f"<referenceID>{html.escape(str(reference_id))}</referenceID>",
-        f"<itemName>{_escape_text(title_ok)}</itemName>",
-        f"<description><![CDATA[{_safe_cdata(desc_ok)}]]></description>",
-        f"<startPrice>{price_ok}</startPrice>",
-        f"<price>{price_ok}</price>",
-        f"<quantity>{qty_ok}</quantity>",
-        f"<categoryID>{html.escape(cat_ok)}</categoryID>",
-        f"<condition>{html.escape(cond_ok)}</condition>",
         f"<itemMode>{html.escape(mode_ok)}</itemMode>",
+        f"<categoryID>{html.escape(cat_ok)}</categoryID>",
+        f"<itemName>{_escape_text(title_ok)}</itemName>",
+        f"<quantity>{qty_ok}</quantity>",
+        f"<condition>{html.escape(cond_ok)}</condition>",
+        f"<description><![CDATA[{_safe_cdata(desc_ok)}]]></description>",
         f"<payOptions>{pay_xml}</payOptions>",
-        f"<shipMethods>{ship_xml}</shipMethods>",
+        f"<shipmethods>{ship_xml}</shipmethods>",
+        f"<startDate>{now.strftime('%Y-%m-%d')}</startDate>",
+        f"<startTime>{now.strftime('%H:%M:%S')}</startTime>",
+        "<durationInDays>30</durationInDays>",
+        "<autoRenew>1</autoRenew>",
+        f"<price>{price_ok}</price>",
+        "<salesTax>19</salesTax>",
+        f"<shortDesc><![CDATA[{_safe_cdata(short_desc)}]]></shortDesc>",
+        "<ifIsSoldOut>deactivate</ifIsSoldOut>",
+        f"<manufacturer>{_escape_text(manufacturer_name)}</manufacturer>",
+        "<prodCatID>0</prodCatID>",
+        "<isApproved>1</isApproved>",
+        "<showOnStartPage>0</showOnStartPage>",
     ]
     if item_number_ok:
         item_lines.append(f"<itemNumber>{_escape_text(item_number_ok)}</itemNumber>")
-    if mpn_ok:
-        item_lines.append(f"<mpn>{_escape_text(mpn_ok)}</mpn>")
+    item_lines.append(f"<itemNumberUniqueFlag>{item_number_unique_flag}</itemNumberUniqueFlag>")
+    item_lines.append(f"<deliveryDaysOnStockFrom>{delivery_from}</deliveryDaysOnStockFrom>")
+    item_lines.append(f"<deliveryDaysOnStockTo>{delivery_to}</deliveryDaysOnStockTo>")
     if ean_ok:
         item_lines.append(f"<ean>{_escape_text(ean_ok)}</ean>")
-    item_lines.append(f"<manufacturer>{_escape_text(DEFAULT_ITEM_MANUFACTURER)}</manufacturer>")
-    item_lines.append(_build_default_product_contact_information_xml())
-    item_lines.append(_build_default_safety_instructions_xml())
-    if images_xml:
-        item_lines.append(f"<images>{images_xml}</images>")
+    if mpn_ok:
+        item_lines.append(f"<mpn>{_escape_text(mpn_ok)}</mpn>")
+    item_lines.append(f"<listPrice>{list_price}</listPrice>")
     if product_properties_xml:
         item_lines.append(f"<productProperties>{product_properties_xml}</productProperties>")
-    item_lines.append(f"<itemNumberUniqueFlag>{item_number_unique_flag}</itemNumberUniqueFlag>")
+    if images_xml:
+        item_lines.append(f"<images>{images_xml}</images>")
+    item_lines.append(_build_default_product_contact_information_xml(company_profile))
+    item_lines.append(_build_default_safety_instructions_xml())
     item_body = "\n        ".join(item_lines)
 
     return (
@@ -246,6 +389,7 @@ def build_item_insert(
     ean: Optional[str] = None,
     mpn: Optional[str] = None,
     item_number: Optional[str] = None,
+    country: Optional[str] = None,
     config: ApiConfig | None = None,
     item_number_unique_flag: int = 1,
 ) -> str:
@@ -255,7 +399,7 @@ def build_item_insert(
         reference_id, title, description, price, quantity, category_id,
         condition, item_mode, pay_options, ship_methods, image_urls,
         product_properties, ean, mpn, item_number,
-        config, "itemInsert", item_number_unique_flag,
+        config, "itemInsert", item_number_unique_flag, country,
     )
 
 
@@ -275,6 +419,7 @@ def build_item_validate(
     ean: Optional[str] = None,
     mpn: Optional[str] = None,
     item_number: Optional[str] = None,
+    country: Optional[str] = None,
     config: ApiConfig | None = None,
 ) -> str:
     """itemValidate: РїСЂРѕРІРµСЂРєР° XML Р±РµР· РґРѕР±Р°РІР»РµРЅРёСЏ С‚РѕРІР°СЂР°, РІРѕР·РІСЂР°С‰Р°РµС‚ СЃС‚РѕРёРјРѕСЃС‚СЊ (Hood API Doc 2.1)."""
@@ -283,7 +428,7 @@ def build_item_validate(
         reference_id, title, description, price, quantity, category_id,
         condition, item_mode, pay_options, ship_methods, image_urls,
         product_properties, ean, mpn, item_number,
-        config, "itemValidate", 1,
+        config, "itemValidate", 1, country,
     )
 
 
@@ -356,7 +501,7 @@ def build_item_delete(items: List[Dict[str, Any]], config: ApiConfig | None = No
 </api>"""
 
 
-def build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = None) -> str:
+def _legacy_build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = None) -> str:
     """itemUpdate: РѕР±РЅРѕРІР»РµРЅРёРµ РґРѕ 5 С‚РѕРІР°СЂРѕРІ. РљР°Р¶РґС‹Р№ item: itemID + РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ title, description, price, quantity, categoryID, condition, itemMode, pay_options, ship_methods, images."""
     config = config or ApiConfig.from_env()
     parts = []
@@ -389,6 +534,116 @@ def build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = No
             lines.append(f"<shipMethods>{ship_xml}</shipMethods>")
         if img_xml:
             lines.append(f"<images>{img_xml}</images>")
+        parts.append("\n            ".join(["<item>", *lines, "</item>"]))
+    items_xml = "\n        ".join(parts)
+    return f"""{_api_head(config, "itemUpdate")}
+    <items>
+        {items_xml}
+    </items>
+</api>"""
+
+
+def build_item_update(items: List[Dict[str, Any]], config: ApiConfig | None = None) -> str:
+    """itemUpdate: обновление до 5 товаров тем же набором полей, что и itemInsert."""
+    config = config or ApiConfig.from_env()
+    parts = []
+    for it in items:
+        item_id = str(it.get("itemID") or "").strip()
+        if not item_id:
+            continue
+
+        reference_id = str(it.get("reference_id") or "").strip()
+        title = str(it.get("title") or it.get("itemName") or "").strip()
+        description = str(it.get("description") or "").strip()
+        category_id = str(it.get("categoryID") or "").strip()
+        condition = str(it.get("condition") or "new").strip()
+        item_mode = str(it.get("itemMode") or "shopProduct").strip()
+        pay_opts = it.get("pay_options") or ["paypal"]
+        ship_methods = it.get("ship_methods") or [{"name": "DHLPacket", "country": "nat", "value": "5.99"}]
+        image_urls = it.get("image_urls") or it.get("images") or []
+        product_properties = it.get("product_properties") or []
+        ean = str(it.get("ean") or "").strip()
+        mpn = str(it.get("mpn") or "").strip()
+        item_number = str(it.get("item_number") or it.get("itemNumber") or "").strip()
+        item_number_unique_flag = int(it.get("item_number_unique_flag") or 1)
+        country = str(it.get("country") or "").strip()
+        quantity = int(it.get("quantity") or 1)
+        price_num = _to_float(it.get("price"))
+        price = _format_decimal(price_num)
+
+        company_profile = _resolve_company_profile(config)
+        manufacturer_name = str(company_profile.get("item_manufacturer") or DEFAULT_ITEM_MANUFACTURER)
+        now = datetime.now()
+        delivery_from, delivery_to = _delivery_days(country)
+        short_desc = _build_short_desc(title, product_properties)
+        list_price = _format_decimal(_process_uvp(price_num))
+        pay_xml = "".join(f"<option>{_escape_text(str(o))}</option>" for o in pay_opts)
+        ship_xml = "".join(
+            f'<shipmethod name="{_escape_text(str(m.get("name", "DHLPacket")))}_{_escape_text(str(m.get("country", "nat")))}"><value>{_escape_text(str(m.get("value", "0")))}</value></shipmethod>'
+            for m in ship_methods
+        )
+        images_xml = "".join(f"<imageURL>{html.escape((u or '').strip())}</imageURL>" for u in image_urls)
+
+        properties_xml_parts = []
+        for prop in product_properties:
+            prop_name = str(prop.get("name", "")).strip()
+            prop_value = prop.get("value")
+            if not prop_name or prop_value is None:
+                continue
+            if isinstance(prop_value, list):
+                prop_value = ", ".join(str(v).strip() for v in prop_value if str(v).strip())
+            else:
+                prop_value = str(prop_value).strip()
+            if not prop_value:
+                continue
+            properties_xml_parts.append(
+                f"<nameValueList><name><![CDATA[{_safe_cdata(prop_name)}]]></name><value><![CDATA[{_safe_cdata(prop_value)}]]></value></nameValueList>"
+            )
+        product_properties_xml = "".join(properties_xml_parts)
+
+        lines = [f"<itemID>{_escape_text(item_id)}</itemID>"]
+        if reference_id:
+            lines.append(f"<referenceID>{_escape_text(reference_id)}</referenceID>")
+        lines.extend(
+            [
+                f"<itemMode>{_escape_text(item_mode)}</itemMode>",
+                f"<categoryID>{_escape_text(category_id)}</categoryID>",
+                f"<itemName>{_escape_text(title)}</itemName>",
+                f"<quantity>{quantity}</quantity>",
+                f"<condition>{_escape_text(condition)}</condition>",
+                f"<description><![CDATA[{_safe_cdata(description)}]]></description>",
+                f"<payOptions>{pay_xml}</payOptions>",
+                f"<shipmethods>{ship_xml}</shipmethods>",
+                f"<startDate>{now.strftime('%Y-%m-%d')}</startDate>",
+                f"<startTime>{now.strftime('%H:%M:%S')}</startTime>",
+                "<durationInDays>30</durationInDays>",
+                "<autoRenew>1</autoRenew>",
+                f"<price>{price}</price>",
+                "<salesTax>19</salesTax>",
+                f"<shortDesc><![CDATA[{_safe_cdata(short_desc)}]]></shortDesc>",
+                "<ifIsSoldOut>deactivate</ifIsSoldOut>",
+                f"<manufacturer>{_escape_text(manufacturer_name)}</manufacturer>",
+                "<prodCatID>0</prodCatID>",
+                "<isApproved>1</isApproved>",
+                "<showOnStartPage>0</showOnStartPage>",
+            ]
+        )
+        if item_number:
+            lines.append(f"<itemNumber>{_escape_text(item_number)}</itemNumber>")
+        lines.append(f"<itemNumberUniqueFlag>{item_number_unique_flag}</itemNumberUniqueFlag>")
+        lines.append(f"<deliveryDaysOnStockFrom>{delivery_from}</deliveryDaysOnStockFrom>")
+        lines.append(f"<deliveryDaysOnStockTo>{delivery_to}</deliveryDaysOnStockTo>")
+        if ean:
+            lines.append(f"<ean>{_escape_text(ean)}</ean>")
+        if mpn:
+            lines.append(f"<mpn>{_escape_text(mpn)}</mpn>")
+        lines.append(f"<listPrice>{list_price}</listPrice>")
+        if product_properties_xml:
+            lines.append(f"<productProperties>{product_properties_xml}</productProperties>")
+        if images_xml:
+            lines.append(f"<images>{images_xml}</images>")
+        lines.append(_build_default_product_contact_information_xml(company_profile))
+        lines.append(_build_default_safety_instructions_xml())
         parts.append("\n            ".join(["<item>", *lines, "</item>"]))
     items_xml = "\n        ".join(parts)
     return f"""{_api_head(config, "itemUpdate")}

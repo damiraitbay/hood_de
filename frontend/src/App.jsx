@@ -70,11 +70,13 @@ export default function App() {
     return {
       docs: `${base}/docs`,
       upload: `${base}/items/upload`,
+      update: `${base}/items/update`,
       status: `${base}/items/status`,
       json: `${base}/items/json`,
       jsonFiles: `${base}/items/json/files`,
       validateOne: `${base}/items/validate_one/`,
       uploadOneBulk: `${base}/items/upload_one`,
+      updateOneBulk: `${base}/items/update_one`,
       deleteByItemNumberBulk: `${base}/items/delete/by-item-number`,
       deleteAll: `${base}/items/delete/all`,
     };
@@ -275,6 +277,18 @@ export default function App() {
     setSelectedIds((prev) => prev.filter((id) => !successIds.includes(id)));
   }
 
+  async function updateSelected() {
+    if (!selectedIds.length) return;
+    if (!window.confirm(`Update ${selectedIds.length} selected item(s)?`)) return;
+    const selectedSnapshot = [...selectedIds];
+    await call(
+      "POST",
+      withSource(endpoints.updateOneBulk),
+      `Update selected (${selectedSnapshot.length})`,
+      { item_ids: selectedSnapshot }
+    );
+  }
+
   async function uploadAllFromSelectedFile() {
     if (!sourceFile) {
       setUiStatus("error", "Upload from selected file", "Select a source file first.");
@@ -283,6 +297,16 @@ export default function App() {
     if (!window.confirm(`Upload all items from selected file: ${sourceFile}?`)) return;
     const url = withSource(`${endpoints.upload}?limit=0`);
     await call("POST", url, `Upload all from selected file (${sourceFile})`);
+  }
+
+  async function updateAllFromSelectedFile() {
+    if (!sourceFile) {
+      setUiStatus("error", "Update from selected file", "Select a source file first.");
+      return;
+    }
+    if (!window.confirm(`Update all items from selected file: ${sourceFile}?`)) return;
+    const url = withSource(`${endpoints.update}?limit=0`);
+    await call("POST", url, `Update all from selected file (${sourceFile})`);
   }
 
   async function uploadAllFromFolder() {
@@ -505,8 +529,14 @@ export default function App() {
           <button className="btn primary" disabled={loading || !selectedIds.length} onClick={uploadSelected}>
             Upload selected ({selectedIds.length})
           </button>
+          <button className="btn" disabled={loading || !selectedIds.length} onClick={updateSelected}>
+            Update selected ({selectedIds.length})
+          </button>
           <button className="btn warning" disabled={loading || !sourceFile} onClick={uploadAllFromSelectedFile}>
             Upload all from selected file
+          </button>
+          <button className="btn warning" disabled={loading || !sourceFile} onClick={updateAllFromSelectedFile}>
+            Update all from selected file
           </button>
           <button className="btn warning" disabled={loading} onClick={uploadAllFromFolder}>
             Upload all JSON files

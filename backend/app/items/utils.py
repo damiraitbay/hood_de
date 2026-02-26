@@ -307,6 +307,7 @@ def normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
         or (f"JVM{ean}" if ean else "")
     )
     item_number = first_present("item_number", "ItemNumber") or (str(ean) if ean else "")
+    country = first_present("Country", "country", "country_code", "Herkunftsland") or ""
     zustand = first_present("Zustand", "Zustand:")
     if not zustand and str(raw.get("ConditionID", "")).strip() == "1000":
         zustand = "Neu"
@@ -370,6 +371,7 @@ def normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
         "ean": ean,
         "mpn": str(mpn).strip(),
         "item_number": str(item_number).strip(),
+        "country": str(country).strip(),
         "product_properties": product_properties,
         "image_urls": images,
         "raw": raw,
