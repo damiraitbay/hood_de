@@ -75,6 +75,7 @@ export default function App() {
       uploadAsync: `${base}/items/upload_async`,
       update: `${base}/items/update`,
       updateAsync: `${base}/items/update_async`,
+      deleteAsyncStatus: `${base}/items/delete_async`,
       status: `${base}/items/status`,
       json: `${base}/items/json`,
       jsonFiles: `${base}/items/json/files`,
@@ -83,8 +84,11 @@ export default function App() {
       updateOneBulk: `${base}/items/update_one`,
       deleteByItemNumberBulk: `${base}/items/delete/by-item-number`,
       deleteBySourceFile: `${base}/items/delete/by-source-file`,
+      deleteBySourceFileAsync: `${base}/items/delete/by-source-file_async`,
       deleteDuplicatesByEan: `${base}/items/delete/duplicates-by-ean`,
+      deleteDuplicatesByEanAsync: `${base}/items/delete/duplicates-by-ean_async`,
       deleteAll: `${base}/items/delete/all`,
+      deleteAllAsync: `${base}/items/delete/all_async`,
     };
   }, [apiBase]);
 
@@ -245,6 +249,94 @@ export default function App() {
     } catch (e) {
       setUiStatus("error", "Async upload", String(e));
       stopUpdatePolling();
+    }
+  }
+
+  async function pollDeleteJob(jobId) {
+    const url = withAccount(`${endpoints.deleteAsyncStatus}/${encodeURIComponent(jobId)}`);
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`GET ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", "Async delete", `Status check failed: HTTP ${res.status}`);
+        stopUpdatePolling();
+        return;
+      }
+
+      const statusValue = String(data?.status || "");
+      const progress = data?.progress || {};
+      const requested = Number(progress?.requested || 0);
+      const deleted = Number(progress?.deleted || 0);
+      const failed = Number(progress?.failed || 0);
+      const phase = String(progress?.phase || "");
+
+      if (statusValue === "queued") {
+        setUiStatus("loading", "Async delete", `Queued. Job: ${jobId}`);
+        return;
+      }
+      if (statusValue === "running") {
+        setUiStatus(
+          "loading",
+          "Async delete",
+          `Running: requested ${requested}, deleted ${deleted}, failed ${failed}${phase ? ` (${phase})` : ""}`
+        );
+        return;
+      }
+      if (statusValue === "completed") {
+        setUiStatus("success", "Async delete", `Completed: deleted ${deleted}, failed ${failed}, requested ${requested}`);
+        stopUpdatePolling();
+        return;
+      }
+      if (statusValue === "failed") {
+        setUiStatus("error", "Async delete", `Failed: ${data?.error || "unknown error"}`);
+        stopUpdatePolling();
+      }
+    } catch (e) {
+      setUiStatus("error", "Async delete", String(e));
+      stopUpdatePolling();
+    }
+  }
+
+  async function startDeleteAsync(url, label) {
+    setLoading(true);
+    setRawOutput("");
+    setUiStatus("loading", label, "Starting async delete...");
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`POST ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", label, `HTTP ${res.status}. Open technical details below.`);
+        return;
+      }
+      const jobId = String(data?.job_id || "").trim();
+      if (!jobId) {
+        setUiStatus("error", label, "job_id is missing in response.");
+        return;
+      }
+      setActiveUpdateJobId(jobId);
+      stopUpdatePolling();
+      setUiStatus("loading", label, `Queued. Job: ${jobId}`);
+      await pollDeleteJob(jobId);
+      updatePollTimerRef.current = setInterval(() => {
+        pollDeleteJob(jobId);
+      }, 2000);
+    } catch (e) {
+      setUiStatus("error", label, String(e));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -530,12 +622,15 @@ export default function App() {
 
   async function deleteAllInHood() {
     if (!window.confirm("Delete ALL items in Hood? This action cannot be undone.")) return;
-    await call("DELETE", withAccount(endpoints.deleteAll), "Delete ALL items");
+    await startDeleteAsync(withAccount(endpoints.deleteAllAsync), "Async delete all");
   }
 
   async function deleteDuplicates() {
     if (!window.confirm("Delete duplicate EAN items and keep one item per EAN?")) return;
-    await call("POST", withAccount(`${endpoints.deleteDuplicatesByEan}?keep_one=true`), "Delete duplicates by EAN");
+    await startDeleteAsync(
+      withAccount(`${endpoints.deleteDuplicatesByEanAsync}?keep_one=true`),
+      "Async delete duplicates by EAN"
+    );
   }
 
   async function deleteAllFromSelectedFile() {
@@ -544,7 +639,7 @@ export default function App() {
       return;
     }
     if (!window.confirm(`Delete all items in Hood from selected file: ${sourceFile}?`)) return;
-    await call("POST", withSource(endpoints.deleteBySourceFile), `Delete all from file (${sourceFile})`);
+    await startDeleteAsync(withSource(endpoints.deleteBySourceFileAsync), `Async delete from file (${sourceFile})`);
   }
 
   useEffect(() => () => stopUpdatePolling(), []);

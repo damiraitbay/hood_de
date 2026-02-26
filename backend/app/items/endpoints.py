@@ -50,6 +50,8 @@ UPDATE_JOBS: Dict[str, Dict[str, Any]] = {}
 UPDATE_JOBS_LOCK = threading.Lock()
 UPLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
 UPLOAD_JOBS_LOCK = threading.Lock()
+DELETE_JOBS: Dict[str, Dict[str, Any]] = {}
+DELETE_JOBS_LOCK = threading.Lock()
 
 
 def _account_mode(account: str | None) -> str | None:
@@ -292,6 +294,13 @@ def _set_upload_job(job_id: str, patch: Dict[str, Any]) -> None:
         current = UPLOAD_JOBS.get(job_id, {})
         current.update(patch)
         UPLOAD_JOBS[job_id] = current
+
+
+def _set_delete_job(job_id: str, patch: Dict[str, Any]) -> None:
+    with DELETE_JOBS_LOCK:
+        current = DELETE_JOBS.get(job_id, {})
+        current.update(patch)
+        DELETE_JOBS[job_id] = current
 
 
 def _is_item_number_ambiguous_error(parsed: Dict[str, Any]) -> bool:
@@ -1592,6 +1601,228 @@ def delete_items_by_source_file(
         "skipped_missing_item_number": skipped_missing,
         "details": details,
     }
+
+
+def _run_delete_source_file_job(job_id: str, source_file: str, account: str | None, batch_size: int) -> None:
+    _set_delete_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+            "progress": {"phase": "running"},
+        },
+    )
+    try:
+        result = delete_items_by_source_file(source_file=source_file, account=account, batch_size=batch_size)
+    except Exception as exc:
+        _set_delete_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+                "progress": {"phase": "failed"},
+            },
+        )
+        return
+
+    _set_delete_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+            "progress": {
+                "phase": "completed",
+                "requested": result.get("requested", 0),
+                "deleted": result.get("deleted", 0),
+                "failed": result.get("failed", 0),
+            },
+        },
+    )
+
+
+def _run_delete_duplicates_job(job_id: str, account: str | None, keep_one: bool, delete_batch_size: int) -> None:
+    _set_delete_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+            "progress": {"phase": "running"},
+        },
+    )
+    try:
+        result = delete_duplicate_ean_items(
+            account=account,
+            keep_one=keep_one,
+            delete_batch_size=delete_batch_size,
+        )
+    except Exception as exc:
+        _set_delete_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+                "progress": {"phase": "failed"},
+            },
+        )
+        return
+
+    _set_delete_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+            "progress": {
+                "phase": "completed",
+                "requested": result.get("requested_item_ids", 0),
+                "deleted": result.get("deleted", 0),
+                "failed": result.get("failed", 0),
+            },
+        },
+    )
+
+
+def _run_delete_all_job(job_id: str, account: str | None, item_status: str, delete_batch_size: int) -> None:
+    _set_delete_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+            "progress": {"phase": "running"},
+        },
+    )
+    try:
+        result = delete_all_items_from_hood(
+            item_status=item_status,
+            delete_batch_size=delete_batch_size,
+            account=account,
+        )
+    except Exception as exc:
+        _set_delete_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+                "progress": {"phase": "failed"},
+            },
+        )
+        return
+
+    _set_delete_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+            "progress": {
+                "phase": "completed",
+                "requested": result.get("requested", 0),
+                "deleted": result.get("deleted", 0),
+                "failed": result.get("failed", 0),
+            },
+        },
+    )
+
+
+@router.post("/delete/by-source-file_async")
+def delete_items_by_source_file_async(
+    background_tasks: BackgroundTasks,
+    source_file: str = Query(...),
+    account: str | None = Query(default=None),
+    batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    _account_mode(account)
+    job_id = uuid4().hex
+    _set_delete_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "type": "delete_by_source_file",
+            "source_file": source_file,
+            "account": account,
+            "batch_size": batch_size,
+        },
+    )
+    background_tasks.add_task(_run_delete_source_file_job, job_id, source_file, account, batch_size)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/delete_async/{job_id}",
+    }
+
+
+@router.post("/delete/duplicates-by-ean_async")
+def delete_duplicate_ean_items_async(
+    background_tasks: BackgroundTasks,
+    account: str | None = Query(default=None),
+    keep_one: bool = Query(default=True),
+    delete_batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    _account_mode(account)
+    job_id = uuid4().hex
+    _set_delete_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "type": "delete_duplicates_by_ean",
+            "account": account,
+            "keep_one": keep_one,
+            "delete_batch_size": delete_batch_size,
+        },
+    )
+    background_tasks.add_task(_run_delete_duplicates_job, job_id, account, keep_one, delete_batch_size)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/delete_async/{job_id}",
+    }
+
+
+@router.delete("/delete/all_async")
+@router.post("/delete/all_async")
+def delete_all_items_from_hood_async(
+    background_tasks: BackgroundTasks,
+    item_status: str = Query(default="running"),
+    delete_batch_size: int = Query(default=200, ge=1, le=500),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    _account_mode(account)
+    job_id = uuid4().hex
+    _set_delete_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "type": "delete_all",
+            "item_status": item_status,
+            "delete_batch_size": delete_batch_size,
+            "account": account,
+        },
+    )
+    background_tasks.add_task(_run_delete_all_job, job_id, account, item_status, delete_batch_size)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/delete_async/{job_id}",
+    }
+
+
+@router.get("/delete_async/{job_id}")
+def delete_job_status(job_id: str) -> Dict[str, Any]:
+    with DELETE_JOBS_LOCK:
+        job = DELETE_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Delete job not found")
+    return job
 
 
 @router.delete("/delete/all")
