@@ -1,49 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-function pretty(obj) {
-  try {
-    return JSON.stringify(obj, null, 2);
-  } catch {
-    return String(obj);
-  }
-}
-
-function parseResponseBody(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-function getItemTitle(item) {
-  return String(item?.Artikelbeschreibung || item?.Name || item?.title || "Item");
-}
-
-function getItemNumber(item) {
-  return String(item?.itemNumber || item?.item_number || item?.Artikelnummer || item?.article_number || "-");
-}
-
-function formatTime(ts) {
-  if (!ts) return "-";
-  return new Date(ts).toLocaleString();
-}
-
-function summarizeData(data, label) {
-  if (Array.isArray(data)) {
-    const successCount = data.filter((x) => x?.success === true).length;
-    const errorCount = data.filter((x) => x?.success !== true).length;
-    return `${label}: success ${successCount}, failed ${errorCount}`;
-  }
-
-  if (data && typeof data === "object") {
-    if (data.success === true) return `${label}: success`;
-    if (typeof data.message === "string" && data.message.trim()) return `${label}: ${data.message}`;
-    if (typeof data.status === "string") return `${label}: ${data.status}`;
-  }
-
-  return `${label}: done`;
-}
+import { useAppDerivedState } from "./hooks/useAppDerivedState";
+import {
+  buildEndpoints,
+  formatTime,
+  getItemNumber,
+  getItemTitle,
+  parseResponseBody,
+  pretty,
+  summarizeData,
+} from "./utils/ui";
 
 export default function App() {
   const [apiBase, setApiBase] = useState("/api");
@@ -68,59 +34,15 @@ export default function App() {
     text: "Check API connection first.",
   });
 
-  const endpoints = useMemo(() => {
-    const base = apiBase.replace(/\/+$/, "");
-    return {
-      docs: `${base}/docs`,
-      upload: `${base}/items/upload`,
-      uploadAsync: `${base}/items/upload_async`,
-      uploadManyAsync: `${base}/items/upload_many_async`,
-      update: `${base}/items/update`,
-      updateAsync: `${base}/items/update_async`,
-      deleteAsyncStatus: `${base}/items/delete_async`,
-      status: `${base}/items/status`,
-      json: `${base}/items/json`,
-      jsonFiles: `${base}/items/json/files`,
-      validateOne: `${base}/items/validate_one/`,
-      uploadOneBulk: `${base}/items/upload_one`,
-      updateOneBulk: `${base}/items/update_one`,
-      deleteByItemNumberBulk: `${base}/items/delete/by-item-number`,
-      deleteBySourceFile: `${base}/items/delete/by-source-file`,
-      deleteBySourceFileAsync: `${base}/items/delete/by-source-file_async`,
-      deleteDuplicatesByEan: `${base}/items/delete/duplicates-by-ean`,
-      deleteDuplicatesByEanAsync: `${base}/items/delete/duplicates-by-ean_async`,
-      deleteAll: `${base}/items/delete/all`,
-      deleteAllAsync: `${base}/items/delete/all_async`,
-    };
-  }, [apiBase]);
-
-  const filteredItems = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return jsonItems;
-    return jsonItems.filter((item) => {
-      const id = String(item?.ID || "").toLowerCase();
-      const title = getItemTitle(item).toLowerCase();
-      return id.includes(q) || title.includes(q);
-    });
-  }, [jsonItems, search]);
-
-  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const selectedFilesSet = useMemo(() => new Set(sourceFilesMulti), [sourceFilesMulti]);
-  const selectedItems = useMemo(
-    () => jsonItems.filter((it) => selectedSet.has(String(it.ID))),
-    [jsonItems, selectedSet]
-  );
-  const firstSelectedItem = selectedItems[0] ?? null;
-
-  const checkItems = useMemo(
-    () => [
-      { label: "API connected", ok: connectionOk },
-      { label: "JSON files loaded", ok: jsonFiles.length > 0 },
-      { label: "Items loaded", ok: jsonItems.length > 0 },
-      { label: "Items selected", ok: selectedIds.length > 0 },
-    ],
-    [connectionOk, jsonFiles.length, jsonItems.length, selectedIds.length]
-  );
+  const endpoints = useMemo(() => buildEndpoints(apiBase), [apiBase]);
+  const { filteredItems, selectedSet, selectedFilesSet, firstSelectedItem, checkItems } = useAppDerivedState({
+    jsonItems,
+    search,
+    selectedIds,
+    sourceFilesMulti,
+    connectionOk,
+    jsonFiles,
+  });
 
   function setUiStatus(type, title, text) {
     setStatus({ type, title, text });
@@ -740,30 +662,65 @@ export default function App() {
   const statusClass = `status status-${status.type}`;
 
   return (
-    <div className="page">
-      <header className="hero">
-        <h1 className="title">Item Manager Panel</h1>
-        <p className="subtitle">Check connection, choose source file, then upload products.</p>
-      </header>
-
-      <section className="card">
-        <div className="topStrip">
+    <div className="siteShell">
+      <header className="siteHeader">
+        <div className="siteBrand">
+          <h1 className="title">Item Manager Panel</h1>
+          <p className="subtitle">Check connection, choose source file, then upload products.</p>
+        </div>
+        <div className="siteHeaderMeta">
           <div className={statusClass}>{loading ? "Working..." : status.title}</div>
           <div className="hint">
             Last action: <b>{formatTime(lastActionAt)}</b>
           </div>
         </div>
-        <div className="checklist">
-          {checkItems.map((step) => (
-            <div key={step.label} className={`checkItem ${step.ok ? "ok" : ""}`}>
-              <span>{step.ok ? "OK" : "..."}</span>
-              <p>{step.label}</p>
-            </div>
-          ))}
-        </div>
-      </section>
+      </header>
 
-      <section className="card">
+      <div className="siteBody">
+        <aside className="siteSidebar">
+          <div className="sideCard">
+            <h3>Navigation</h3>
+            <nav className="sideNav">
+              <a href="#overview">Overview</a>
+              <a href="#connection">Connection</a>
+              <a href="#selection">Item Selection</a>
+              <a href="#actions">Actions</a>
+              <a href="#delete">Delete</a>
+              <a href="#result">Result</a>
+            </nav>
+          </div>
+          <div className="sideCard">
+            <h3>Quick Actions</h3>
+            <div className="sideActions">
+              <button className="btn" disabled={loading} onClick={checkConnection}>
+                Check connection
+              </button>
+              <button className="btn" disabled={loading} onClick={loadJsonFiles}>
+                Refresh JSON files
+              </button>
+              <button className="btn primary" disabled={loading} onClick={loadJsonItems}>
+                Load items
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        <main className="siteMain">
+          <section id="overview" className="card">
+            <div className="topStrip">
+              <h2 className="cardTitle">Overview</h2>
+            </div>
+            <div className="checklist">
+              {checkItems.map((step) => (
+                <div key={step.label} className={`checkItem ${step.ok ? "ok" : ""}`}>
+                  <span>{step.ok ? "OK" : "..."}</span>
+                  <p>{step.label}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section id="connection" className="card">
         <div className="cardTop">
           <div>
             <h2 className="cardTitle">1) Connection and Source File</h2>
@@ -883,148 +840,156 @@ export default function App() {
             <b>{sourceFile || "-"}</b>
           </div>
         </div>
-      </section>
+          </section>
 
-      <section className="card">
-        <h2 className="cardTitle">2) Item Selection</h2>
-        <div className="row">
-          <label className="label grow">
-            Search by ID or title
-            <input
-              className="input"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Example: 83859 or sofa"
-              disabled={loading}
-            />
-          </label>
-        </div>
+          <section id="selection" className="card">
+            <h2 className="cardTitle">2) Item Selection</h2>
+            <div className="row">
+              <label className="label grow">
+                Search by ID or title
+                <input
+                  className="input"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Example: 83859 or sofa"
+                  disabled={loading}
+                />
+              </label>
+            </div>
 
-        <div className="itemsWrap">
-          {filteredItems.length === 0 ? (
-            <div className="empty">{jsonItems.length === 0 ? "No items loaded yet." : "No matches."}</div>
-          ) : (
-            <table className="itemsTable">
-              <thead>
-                <tr>
-                  <th>Select</th>
-                  <th>ID</th>
-                  <th>Title</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredItems.slice(0, 50).map((item) => {
-                  const id = String(item.ID);
-                  const active = selectedSet.has(id);
-                  return (
-                    <tr key={id} className={active ? "rowActive" : ""} onClick={() => toggleItemSelection(id)}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={active}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={() => toggleItemSelection(id)}
-                        />
-                      </td>
-                      <td>{id}</td>
-                      <td>{getItemTitle(item)}</td>
+            <div className="itemsWrap">
+              {filteredItems.length === 0 ? (
+                <div className="empty">{jsonItems.length === 0 ? "No items loaded yet." : "No matches."}</div>
+              ) : (
+                <table className="itemsTable">
+                  <thead>
+                    <tr>
+                      <th>Select</th>
+                      <th>ID</th>
+                      <th>Title</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
+                  </thead>
+                  <tbody>
+                    {filteredItems.slice(0, 50).map((item) => {
+                      const id = String(item.ID);
+                      const active = selectedSet.has(id);
+                      return (
+                        <tr key={id} className={active ? "rowActive" : ""} onClick={() => toggleItemSelection(id)}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={active}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={() => toggleItemSelection(id)}
+                            />
+                          </td>
+                          <td>{id}</td>
+                          <td>{getItemTitle(item)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
 
-        <div className="selectedCard">
-          <div>
-            <span>Selected count</span>
-            <b>{selectedIds.length || 0}</b>
-          </div>
-          <div>
-            <span>itemNumber</span>
-            <b>{firstSelectedItem ? getItemNumber(firstSelectedItem) : "-"}</b>
-          </div>
-          <div className="selectedWide">
-            <span>First selected title</span>
-            <b>{firstSelectedItem ? getItemTitle(firstSelectedItem) : "-"}</b>
-          </div>
-        </div>
-      </section>
+            <div className="selectedCard">
+              <div>
+                <span>Selected count</span>
+                <b>{selectedIds.length || 0}</b>
+              </div>
+              <div>
+                <span>itemNumber</span>
+                <b>{firstSelectedItem ? getItemNumber(firstSelectedItem) : "-"}</b>
+              </div>
+              <div className="selectedWide">
+                <span>First selected title</span>
+                <b>{firstSelectedItem ? getItemTitle(firstSelectedItem) : "-"}</b>
+              </div>
+            </div>
+          </section>
 
-      <section className="card">
-        <h2 className="cardTitle">3) Actions</h2>
-        <p className="cardHint">Upload selected items, selected source file, or all JSON files.</p>
+          <section id="actions" className="card">
+            <h2 className="cardTitle">3) Actions</h2>
+            <p className="cardHint">Upload selected items, selected source file, or all JSON files.</p>
 
-        <div className="row">
-          <button className="btn" disabled={loading || !selectedIds.length} onClick={validateSelected}>
-            Validate first selected
-          </button>
-          <button className="btn primary" disabled={loading || !selectedIds.length} onClick={uploadSelected}>
-            Upload selected ({selectedIds.length})
-          </button>
-          <button className="btn" disabled={loading || !selectedIds.length} onClick={updateSelected}>
-            Update selected ({selectedIds.length})
-          </button>
-          <button className="btn warning" disabled={loading || !sourceFile} onClick={uploadAllFromSelectedFile}>
-            Upload all from selected file
-          </button>
-          <button className="btn warning" disabled={loading || !sourceFilesMulti.length} onClick={uploadSelectedFiles}>
-            Upload selected files ({sourceFilesMulti.length})
-          </button>
-          <button className="btn warning" disabled={loading || !sourceFile} onClick={updateAllFromSelectedFile}>
-            Update all from selected file
-          </button>
-          <button className="btn warning" disabled={loading} onClick={uploadAllFromFolder}>
-            Upload all JSON files
-          </button>
-          <button className="btn" disabled={loading} onClick={loadFailedItems}>
-            Show failed items
-          </button>
-        </div>
-      </section>
+            <div className="row">
+              <button className="btn" disabled={loading || !selectedIds.length} onClick={validateSelected}>
+                Validate first selected
+              </button>
+              <button className="btn primary" disabled={loading || !selectedIds.length} onClick={uploadSelected}>
+                Upload selected ({selectedIds.length})
+              </button>
+              <button className="btn" disabled={loading || !selectedIds.length} onClick={updateSelected}>
+                Update selected ({selectedIds.length})
+              </button>
+              <button className="btn warning" disabled={loading || !sourceFile} onClick={uploadAllFromSelectedFile}>
+                Upload all from selected file
+              </button>
+              <button className="btn warning" disabled={loading || !sourceFilesMulti.length} onClick={uploadSelectedFiles}>
+                Upload selected files ({sourceFilesMulti.length})
+              </button>
+              <button className="btn warning" disabled={loading || !sourceFile} onClick={updateAllFromSelectedFile}>
+                Update all from selected file
+              </button>
+              <button className="btn warning" disabled={loading} onClick={uploadAllFromFolder}>
+                Upload all JSON files
+              </button>
+              <button className="btn" disabled={loading} onClick={loadFailedItems}>
+                Show failed items
+              </button>
+            </div>
+          </section>
 
-      <section className="card dangerZone">
-        <h2 className="cardTitle">Delete by itemNumber</h2>
-        <p className="cardHint">One itemNumber per line.</p>
-        <div className="row">
-          <label className="label grow">
-            itemNumber list
-            <textarea
-              className="input"
-              value={deleteItemNumbers}
-              onChange={(e) => setDeleteItemNumbers(e.target.value)}
-              placeholder={"4069943027235\n4069943027174\n4069943027001"}
-              disabled={loading}
-            />
-          </label>
-          <button className="btn danger" disabled={loading || !deleteItemNumbers.trim()} onClick={deleteByItemNumber}>
-            Delete in Hood
-          </button>
-          <button className="btn danger" disabled={loading || !sourceFile} onClick={deleteAllFromSelectedFile}>
-            Delete all from selected file
-          </button>
-          <button className="btn danger" disabled={loading} onClick={deleteDuplicates}>
-            Delete duplicates
-          </button>
-          <button className="btn danger" disabled={loading} onClick={deleteAllInHood}>
-            Delete ALL in Hood
-          </button>
-        </div>
-      </section>
+          <section id="delete" className="card dangerZone">
+            <h2 className="cardTitle">Delete by itemNumber</h2>
+            <p className="cardHint">One itemNumber per line.</p>
+            <div className="row">
+              <label className="label grow">
+                itemNumber list
+                <textarea
+                  className="input"
+                  value={deleteItemNumbers}
+                  onChange={(e) => setDeleteItemNumbers(e.target.value)}
+                  placeholder={"4069943027235\n4069943027174\n4069943027001"}
+                  disabled={loading}
+                />
+              </label>
+              <button className="btn danger" disabled={loading || !deleteItemNumbers.trim()} onClick={deleteByItemNumber}>
+                Delete in Hood
+              </button>
+              <button className="btn danger" disabled={loading || !sourceFile} onClick={deleteAllFromSelectedFile}>
+                Delete all from selected file
+              </button>
+              <button className="btn danger" disabled={loading} onClick={deleteDuplicates}>
+                Delete duplicates
+              </button>
+              <button className="btn danger" disabled={loading} onClick={deleteAllInHood}>
+                Delete ALL in Hood
+              </button>
+            </div>
+          </section>
 
-      <section className="card">
-        <h2 className="cardTitle">Result</h2>
-        <div className="resultMain">{status.text}</div>
-        {activeUpdateJobId ? <div className="hint">Active async job: <code>{activeUpdateJobId}</code></div> : null}
-        <details className="advanced">
-          <summary>Technical details</summary>
-          <pre className="output">{rawOutput || "-"}</pre>
-        </details>
-        <div className="hint">
-          Logs: <code>backend/logs/items.log</code>
-        </div>
-      </section>
+          <section id="result" className="card">
+            <h2 className="cardTitle">Result</h2>
+            <div className="resultMain">{status.text}</div>
+            {activeUpdateJobId ? <div className="hint">Active async job: <code>{activeUpdateJobId}</code></div> : null}
+            <details className="advanced">
+              <summary>Technical details</summary>
+              <pre className="output">{rawOutput || "-"}</pre>
+            </details>
+            <div className="hint">
+              Logs: <code>backend/logs/items.log</code>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <footer className="siteFooter">
+        <span>Hood Manager Panel</span>
+        <span>Account: {accountMode}</span>
+        <span>API: {apiBase}</span>
+      </footer>
     </div>
   );
 }
