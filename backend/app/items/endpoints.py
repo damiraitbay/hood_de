@@ -61,7 +61,12 @@ def _account_mode(account: str | None) -> str | None:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-def _load_all_hood_items(cfg: ApiConfig, item_status: str = "running", group_size: int = 500) -> List[Dict[str, Any]]:
+def _load_all_hood_items(
+    cfg: ApiConfig,
+    item_status: str = "running",
+    group_size: int = 500,
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     start_at = 1
 
@@ -88,8 +93,18 @@ def _load_all_hood_items(cfg: ApiConfig, item_status: str = "running", group_siz
 
         page_items = page.get("items", [])
         items.extend(page_items)
-
         total_records = int(page.get("total_records") or 0)
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "loading_items",
+                    "fetched_items": len(items),
+                    "total_items": total_records if total_records > 0 else None,
+                    "start_at": int(page.get("start_at") or start_at),
+                    "group_size": int(page.get("group_size") or len(page_items) or group_size),
+                }
+            )
+
         if not page_items:
             break
         if total_records and len(items) >= total_records:
@@ -2124,7 +2139,12 @@ def _run_delete_all_items_from_hood(
 ) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
-    hood_items = _load_all_hood_items(cfg=cfg, item_status=item_status, group_size=500)
+    hood_items = _load_all_hood_items(
+        cfg=cfg,
+        item_status=item_status,
+        group_size=500,
+        progress_cb=progress_cb,
+    )
     logger.info(
         "Delete all start: item_status=%s, found_in_item_list=%s, delete_batch_size=%s",
         item_status,
@@ -2136,15 +2156,38 @@ def _run_delete_all_items_from_hood(
     seen: set[str] = set()
     missing_item_id = 0
 
-    for item in hood_items:
+    total_items_to_scan = len(hood_items)
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "taking_ids",
+                "processed": 0,
+                "total": total_items_to_scan,
+                "deleted": 0,
+                "failed": 0,
+            }
+        )
+
+    for idx, item in enumerate(hood_items, start=1):
         item_id = str(item.get("itemID") or "").strip()
         if not item_id:
             missing_item_id += 1
-            continue
-        if item_id in seen:
-            continue
-        seen.add(item_id)
-        item_ids.append(item_id)
+        elif item_id not in seen:
+            seen.add(item_id)
+            item_ids.append(item_id)
+
+        if progress_cb is not None and (idx == total_items_to_scan or idx % 200 == 0):
+            progress_cb(
+                {
+                    "phase": "taking_ids",
+                    "processed": idx,
+                    "total": total_items_to_scan,
+                    "collected": len(item_ids),
+                    "missing_item_id": missing_item_id,
+                    "deleted": 0,
+                    "failed": 0,
+                }
+            )
 
     if not item_ids:
         if progress_cb is not None:

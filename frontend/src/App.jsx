@@ -293,6 +293,25 @@ export default function App() {
         return;
       }
       if (statusValue === "running") {
+        if (phase === "taking_ids") {
+          const processedIds = Number(progress?.processed ?? 0);
+          const totalIds = Number(progress?.total ?? 0);
+          const collectedIds = Number(progress?.collected ?? 0);
+          const suffix = totalIds > 0 ? `${processedIds}/${totalIds}` : `${processedIds}`;
+          setUiStatus(
+            "loading",
+            "Async delete",
+            `Taking IDs: ${suffix}, collected ${collectedIds}`
+          );
+          return;
+        }
+        if (phase === "loading_items") {
+          const fetchedItems = Number(progress?.fetched_items ?? 0);
+          const totalItems = Number(progress?.total_items ?? 0);
+          const suffix = totalItems > 0 ? `${fetchedItems}/${totalItems}` : `${fetchedItems}`;
+          setUiStatus("loading", "Async delete", `Loading items: ${suffix}`);
+          return;
+        }
         const metrics =
           requested == null && deleted == null && failed == null
             ? "Running: processing..."
