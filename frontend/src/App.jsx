@@ -640,14 +640,6 @@ export default function App() {
     await startDeleteAsync(withAccount(endpoints.deleteAllAsync), "Async delete all");
   }
 
-  async function deleteDuplicates() {
-    if (!window.confirm("Delete duplicate EAN items and keep one item per EAN?")) return;
-    await startDeleteAsync(
-      withAccount(`${endpoints.deleteDuplicatesByEanAsync}?keep_one=true`),
-      "Async delete duplicates by EAN"
-    );
-  }
-
   async function deleteAllFromSelectedFile() {
     if (!sourceFile) {
       setUiStatus("error", "Delete from selected file", "Select a source file first.");
@@ -960,9 +952,6 @@ export default function App() {
               </button>
               <button className="btn danger" disabled={loading || !sourceFile} onClick={deleteAllFromSelectedFile}>
                 Delete all from selected file
-              </button>
-              <button className="btn danger" disabled={loading} onClick={deleteDuplicates}>
-                Delete duplicates
               </button>
               <button className="btn danger" disabled={loading} onClick={deleteAllInHood}>
                 Delete ALL in Hood
