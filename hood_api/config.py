@@ -23,10 +23,10 @@ class ApiConfig:
                 raise ValueError("HOOD_API_XLUSER and HOOD_API_XLPASSWORD must be set")
         elif mode in ("jvmoebel", "jv"):
             user = os.environ.get("HOOD_API_JVUSER", "").strip()
-            # Keep both names for compatibility with existing env naming.
-            password = os.environ.get("HOOD_API_JSPASSWORD", "").strip() or os.environ.get("HOOD_API_JVPASSWORD", "").strip()
+            # Prefer JVPASSWORD (same style as XL), keep JSPASSWORD as legacy fallback.
+            password = os.environ.get("HOOD_API_JVPASSWORD", "").strip() or os.environ.get("HOOD_API_JSPASSWORD", "").strip()
             if not user or not password:
-                raise ValueError("HOOD_API_JVUSER and HOOD_API_JSPASSWORD must be set")
+                raise ValueError("HOOD_API_JVUSER and HOOD_API_JVPASSWORD must be set")
         else:
             user = os.environ.get("HOOD_API_USER", "").strip()
             password = os.environ.get("HOOD_API_PASSWORD", "").strip()
