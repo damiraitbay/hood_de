@@ -2103,7 +2103,6 @@ def _run_delete_all_items_from_hood(
     deleted_by_status: Dict[str, int] = {status_name: 0 for status_name in statuses}
     failed_by_status: Dict[str, int] = {status_name: 0 for status_name in statuses}
     responses: List[Dict[str, Any]] = []
-    seen_item_ids: set[str] = set()
     total_requested = 0
     total_deleted = 0
     total_failed = 0
@@ -2112,131 +2111,259 @@ def _run_delete_all_items_from_hood(
     processed_batches = 0
     total_batches_all = 0
     delete_workers = max(1, min(int(os.environ.get("HOOD_DELETE_ALL_WORKERS", "4")), 16))
+    max_status_passes = max(1, int(os.environ.get("HOOD_DELETE_ALL_MAX_STATUS_PASSES", "200")))
 
-    for status_index, status_name in enumerate(statuses, start=1):
-        status_items = _load_all_hood_items(
-            cfg=cfg,
-            item_status=status_name,
-            group_size=500,
-            progress_cb=None,
-        )
-        found_in_item_list_by_status[status_name] = len(status_items)
-        logger.info(
-            "Delete all status start: status=%s, found_in_item_list=%s, status_index=%s/%s",
-            status_name,
-            len(status_items),
-            status_index,
-            len(statuses),
-        )
-
-        status_item_ids: List[str] = []
-        status_missing_item_id = 0
-        for item in status_items:
-            item_id = str(item.get("itemID") or "").strip()
-            if not item_id:
-                status_missing_item_id += 1
-                continue
-            if item_id in seen_item_ids:
-                continue
-            seen_item_ids.add(item_id)
-            status_item_ids.append(item_id)
-
-        missing_item_id_by_status[status_name] = status_missing_item_id
-        total_missing_item_id += status_missing_item_id
-        requested_by_status[status_name] = len(status_item_ids)
-        total_requested += len(status_item_ids)
-
-        if progress_cb is not None:
-            progress_cb(
-                {
-                    "phase": "prepared",
-                    "status": status_name,
-                    "status_index": status_index,
-                    "status_count": len(statuses),
-                    "requested": total_requested,
-                    "processed": processed_items,
-                    "deleted": total_deleted,
-                    "failed": total_failed,
-                    "total_batches": total_batches_all,
-                    "processed_batches": processed_batches,
-                }
-            )
-
-        if not status_item_ids:
-            continue
-
-        total_batches_status = (len(status_item_ids) + delete_batch_size - 1) // delete_batch_size
-        total_batches_all += total_batches_status
-        chunks: List[tuple[int, List[str]]] = []
-        for i in range(0, len(status_item_ids), delete_batch_size):
-            chunk = status_item_ids[i : i + delete_batch_size]
-            batch_num = (i // delete_batch_size) + 1
-            chunks.append((batch_num, chunk))
-
-        def _delete_batch(batch_num: int, chunk: List[str]) -> Dict[str, Any]:
-            xml_delete = build_item_delete(
-                items=[{"itemID": item_id} for item_id in chunk],
+    def _load_status_items_until_no_auctions(status_name: str) -> tuple[List[Dict[str, Any]], bool]:
+        items: List[Dict[str, Any]] = []
+        start_at = 1
+        while True:
+            xml_body = build_item_list(
+                item_status=status_name,
+                start_at=start_at,
+                group_size=500,
+                start_date=None,
+                end_date=None,
                 config=cfg,
             )
             try:
-                delete_resp_xml = send_request(xml_delete, config=cfg)
-                resp = parse_item_delete_response(delete_resp_xml)
-                return {
-                    "batch_num": batch_num,
-                    "chunk_size": len(chunk),
-                    "chunk": chunk,
-                    "response": resp,
-                    "error": None,
-                }
+                response_xml = send_request(xml_body, config=cfg)
             except Exception as exc:
-                return {
-                    "batch_num": batch_num,
-                    "chunk_size": len(chunk),
-                    "chunk": chunk,
-                    "response": None,
-                    "error": str(exc),
-                }
+                raise HTTPException(status_code=502, detail=str(exc))
 
-        worker_count = min(delete_workers, max(total_batches_status, 1))
-        logger.info(
-            "Delete all status workers: status=%s, workers=%s, total_batches=%s, delete_batch_size=%s",
-            status_name,
-            worker_count,
-            total_batches_status,
-            delete_batch_size,
-        )
+            page = parse_item_list_response(response_xml)
+            errors = page.get("errors") or []
+            if errors:
+                no_auctions = any("no auctions found" in str(err).strip().lower() for err in errors)
+                if no_auctions:
+                    return items, True
+                raise HTTPException(
+                    status_code=502,
+                    detail={"message": page.get("message"), "errors": errors},
+                )
 
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_delete_batch, batch_num, chunk) for batch_num, chunk in chunks]
-            for future in as_completed(futures):
-                batch_result = future.result()
-                batch_num = int(batch_result["batch_num"])
-                chunk = batch_result["chunk"]
-                chunk_size = int(batch_result["chunk_size"])
-                error_text = batch_result.get("error")
+            page_items = page.get("items", [])
+            items.extend(page_items)
+            total_records = int(page.get("total_records") or 0)
 
-                processed_batches += 1
-                processed_items += chunk_size
+            if not page_items:
+                return items, False
+            if total_records and len(items) >= total_records:
+                return items, False
 
-                if error_text:
-                    total_failed += chunk_size
-                    failed_by_status[status_name] += chunk_size
-                    logger.error(
-                        "Delete all batch failed: status=%s, batch=%s/%s, requested=%s, error=%s",
-                        status_name,
-                        batch_num,
-                        total_batches_status,
-                        chunk_size,
-                        error_text,
-                    )
-                    responses.append(
-                        {
-                            "success": False,
-                            "status_scope": status_name,
-                            "error": error_text,
-                            "requested_item_ids": chunk,
-                        }
-                    )
+            effective_group_size = int(page.get("group_size") or 0)
+            step = effective_group_size if effective_group_size > 0 else len(page_items)
+            if len(page_items) < step:
+                return items, False
+            start_at += step
+
+    for status_index, status_name in enumerate(statuses, start=1):
+        status_pass = 0
+        while True:
+            status_pass += 1
+            if status_pass > max_status_passes:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Delete all guard reached for status '{status_name}' "
+                        f"after {max_status_passes} passes without 'No auctions found.'"
+                    ),
+                )
+
+            status_items, exhausted_by_no_auctions = _load_status_items_until_no_auctions(status_name)
+            found_in_item_list_by_status[status_name] += len(status_items)
+            logger.info(
+                "Delete all status pass: status=%s, pass=%s, found_in_item_list=%s, exhausted_by_no_auctions=%s, status_index=%s/%s",
+                status_name,
+                status_pass,
+                len(status_items),
+                exhausted_by_no_auctions,
+                status_index,
+                len(statuses),
+            )
+
+            status_item_ids: List[str] = []
+            status_missing_item_id = 0
+            status_seen: set[str] = set()
+            for item in status_items:
+                item_id = str(item.get("itemID") or "").strip()
+                if not item_id:
+                    status_missing_item_id += 1
+                    continue
+                if item_id in status_seen:
+                    continue
+                status_seen.add(item_id)
+                status_item_ids.append(item_id)
+
+            missing_item_id_by_status[status_name] += status_missing_item_id
+            total_missing_item_id += status_missing_item_id
+            requested_by_status[status_name] += len(status_item_ids)
+            total_requested += len(status_item_ids)
+
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "phase": "prepared",
+                        "status": status_name,
+                        "status_index": status_index,
+                        "status_count": len(statuses),
+                        "status_pass": status_pass,
+                        "requested": total_requested,
+                        "processed": processed_items,
+                        "deleted": total_deleted,
+                        "failed": total_failed,
+                        "total_batches": total_batches_all,
+                        "processed_batches": processed_batches,
+                    }
+                )
+
+            # Move to the next status only after explicit "No auctions found."
+            if exhausted_by_no_auctions and not status_item_ids:
+                break
+            if not status_item_ids:
+                continue
+
+            total_batches_status = (len(status_item_ids) + delete_batch_size - 1) // delete_batch_size
+            total_batches_all += total_batches_status
+            chunks: List[tuple[int, List[str]]] = []
+            for i in range(0, len(status_item_ids), delete_batch_size):
+                chunk = status_item_ids[i : i + delete_batch_size]
+                batch_num = (i // delete_batch_size) + 1
+                chunks.append((batch_num, chunk))
+
+            def _delete_batch(batch_num: int, chunk: List[str]) -> Dict[str, Any]:
+                xml_delete = build_item_delete(
+                    items=[{"itemID": item_id} for item_id in chunk],
+                    config=cfg,
+                )
+                try:
+                    delete_resp_xml = send_request(xml_delete, config=cfg)
+                    resp = parse_item_delete_response(delete_resp_xml)
+                    return {
+                        "batch_num": batch_num,
+                        "chunk_size": len(chunk),
+                        "chunk": chunk,
+                        "response": resp,
+                        "error": None,
+                    }
+                except Exception as exc:
+                    return {
+                        "batch_num": batch_num,
+                        "chunk_size": len(chunk),
+                        "chunk": chunk,
+                        "response": None,
+                        "error": str(exc),
+                    }
+
+            worker_count = min(delete_workers, max(total_batches_status, 1))
+            logger.info(
+                "Delete all status workers: status=%s, pass=%s, workers=%s, total_batches=%s, delete_batch_size=%s",
+                status_name,
+                status_pass,
+                worker_count,
+                total_batches_status,
+                delete_batch_size,
+            )
+
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [executor.submit(_delete_batch, batch_num, chunk) for batch_num, chunk in chunks]
+                for future in as_completed(futures):
+                    batch_result = future.result()
+                    batch_num = int(batch_result["batch_num"])
+                    chunk = batch_result["chunk"]
+                    chunk_size = int(batch_result["chunk_size"])
+                    error_text = batch_result.get("error")
+
+                    processed_batches += 1
+                    processed_items += chunk_size
+
+                    if error_text:
+                        total_failed += chunk_size
+                        failed_by_status[status_name] += chunk_size
+                        logger.error(
+                            "Delete all batch failed: status=%s, pass=%s, batch=%s/%s, requested=%s, error=%s",
+                            status_name,
+                            status_pass,
+                            batch_num,
+                            total_batches_status,
+                            chunk_size,
+                            error_text,
+                        )
+                        responses.append(
+                            {
+                                "success": False,
+                                "status_scope": status_name,
+                                "error": error_text,
+                                "requested_item_ids": chunk,
+                            }
+                        )
+                        if progress_cb is not None:
+                            progress_cb(
+                                {
+                                    "phase": "deleting",
+                                    "status": status_name,
+                                    "status_index": status_index,
+                                    "status_count": len(statuses),
+                                    "status_pass": status_pass,
+                                    "requested": total_requested,
+                                    "processed": min(processed_items, total_requested),
+                                    "deleted": total_deleted,
+                                    "failed": total_failed,
+                                    "total_batches": total_batches_all,
+                                    "processed_batches": processed_batches,
+                                }
+                            )
+                        continue
+
+                    resp = batch_result["response"] or {}
+                    if isinstance(resp, dict):
+                        resp["status_scope"] = status_name
+                    responses.append(resp)
+
+                    item_results = resp.get("items", [])
+                    if item_results:
+                        batch_deleted = sum(1 for x in item_results if str(x.get("status") or "").lower() == "success")
+                        batch_failed = sum(1 for x in item_results if str(x.get("status") or "").lower() == "failed")
+                        unresolved = max(chunk_size - batch_deleted - batch_failed, 0)
+                        total_deleted += batch_deleted
+                        total_failed += batch_failed + unresolved
+                        deleted_by_status[status_name] += batch_deleted
+                        failed_by_status[status_name] += batch_failed + unresolved
+                        logger.info(
+                            "Delete all batch done: status=%s, pass=%s, batch=%s/%s, requested=%s, deleted=%s, failed=%s, unresolved=%s",
+                            status_name,
+                            status_pass,
+                            batch_num,
+                            total_batches_status,
+                            chunk_size,
+                            batch_deleted,
+                            batch_failed,
+                            unresolved,
+                        )
+                    elif resp.get("success"):
+                        total_deleted += chunk_size
+                        deleted_by_status[status_name] += chunk_size
+                        logger.info(
+                            "Delete all batch done: status=%s, pass=%s, batch=%s/%s, requested=%s, deleted=%s, failed=0",
+                            status_name,
+                            status_pass,
+                            batch_num,
+                            total_batches_status,
+                            chunk_size,
+                            chunk_size,
+                        )
+                    else:
+                        total_failed += chunk_size
+                        failed_by_status[status_name] += chunk_size
+                        logger.warning(
+                            "Delete all batch done: status=%s, pass=%s, batch=%s/%s, requested=%s, deleted=0, failed=%s",
+                            status_name,
+                            status_pass,
+                            batch_num,
+                            total_batches_status,
+                            chunk_size,
+                            chunk_size,
+                        )
+
                     if progress_cb is not None:
                         progress_cb(
                             {
@@ -2244,6 +2371,7 @@ def _run_delete_all_items_from_hood(
                                 "status": status_name,
                                 "status_index": status_index,
                                 "status_count": len(statuses),
+                                "status_pass": status_pass,
                                 "requested": total_requested,
                                 "processed": min(processed_items, total_requested),
                                 "deleted": total_deleted,
@@ -2252,70 +2380,6 @@ def _run_delete_all_items_from_hood(
                                 "processed_batches": processed_batches,
                             }
                         )
-                    continue
-
-                resp = batch_result["response"] or {}
-                if isinstance(resp, dict):
-                    resp["status_scope"] = status_name
-                responses.append(resp)
-
-                item_results = resp.get("items", [])
-                if item_results:
-                    batch_deleted = sum(1 for x in item_results if str(x.get("status") or "").lower() == "success")
-                    batch_failed = sum(1 for x in item_results if str(x.get("status") or "").lower() == "failed")
-                    unresolved = max(chunk_size - batch_deleted - batch_failed, 0)
-                    total_deleted += batch_deleted
-                    total_failed += batch_failed + unresolved
-                    deleted_by_status[status_name] += batch_deleted
-                    failed_by_status[status_name] += batch_failed + unresolved
-                    logger.info(
-                        "Delete all batch done: status=%s, batch=%s/%s, requested=%s, deleted=%s, failed=%s, unresolved=%s",
-                        status_name,
-                        batch_num,
-                        total_batches_status,
-                        chunk_size,
-                        batch_deleted,
-                        batch_failed,
-                        unresolved,
-                    )
-                elif resp.get("success"):
-                    total_deleted += chunk_size
-                    deleted_by_status[status_name] += chunk_size
-                    logger.info(
-                        "Delete all batch done: status=%s, batch=%s/%s, requested=%s, deleted=%s, failed=0",
-                        status_name,
-                        batch_num,
-                        total_batches_status,
-                        chunk_size,
-                        chunk_size,
-                    )
-                else:
-                    total_failed += chunk_size
-                    failed_by_status[status_name] += chunk_size
-                    logger.warning(
-                        "Delete all batch done: status=%s, batch=%s/%s, requested=%s, deleted=0, failed=%s",
-                        status_name,
-                        batch_num,
-                        total_batches_status,
-                        chunk_size,
-                        chunk_size,
-                    )
-
-                if progress_cb is not None:
-                    progress_cb(
-                        {
-                            "phase": "deleting",
-                            "status": status_name,
-                            "status_index": status_index,
-                            "status_count": len(statuses),
-                            "requested": total_requested,
-                            "processed": min(processed_items, total_requested),
-                            "deleted": total_deleted,
-                            "failed": total_failed,
-                            "total_batches": total_batches_all,
-                            "processed_batches": processed_batches,
-                        }
-                    )
 
     logger.info(
         "Delete all done: item_status=%s, requested=%s, deleted=%s, failed=%s, missing_item_id=%s",
