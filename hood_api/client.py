@@ -5,8 +5,32 @@ import re
 import time
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from .config import ApiConfig
+
+_SESSION: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    global _SESSION
+    if _SESSION is not None:
+        return _SESSION
+
+    pool_connections = int(os.environ.get("HOOD_API_POOL_CONNECTIONS", "32"))
+    pool_maxsize = int(os.environ.get("HOOD_API_POOL_MAXSIZE", "32"))
+    max_retries = int(os.environ.get("HOOD_API_HTTP_ADAPTER_RETRIES", "0"))
+
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
+        max_retries=max_retries,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    _SESSION = session
+    return session
 
 
 def send_request(xml_body: str, config: ApiConfig | None = None) -> str:
@@ -30,9 +54,10 @@ def send_request(xml_body: str, config: ApiConfig | None = None) -> str:
     base_backoff = float(os.environ.get("HOOD_API_RETRY_BACKOFF_SECONDS", "2"))
 
     last_exc: Exception | None = None
+    session = _get_session()
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.post(
+            response = session.post(
                 cfg.base_url,
                 data=xml_body.encode("utf-8"),
                 headers=headers,
