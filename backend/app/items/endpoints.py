@@ -2030,7 +2030,7 @@ def delete_items_by_source_file_async(
 @router.post("/delete/all_async")
 def delete_all_items_from_hood_async(
     background_tasks: BackgroundTasks,
-    item_status: str = Query(default="all"),
+    item_status: str = Query(default="running,sold,unsuccessful"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
@@ -2080,7 +2080,7 @@ def delete_job_status(job_id: str) -> Dict[str, Any]:
 
 
 def _run_delete_all_items_from_hood(
-    item_status: str = Query(default="all"),
+    item_status: str = Query(default="running,sold,unsuccessful"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
     progress_cb: Callable[[Dict[str, Any]], None] | None = None,
@@ -2379,7 +2379,7 @@ def _run_delete_all_items_from_hood(
 @router.post("/delete/all")
 def delete_all_items_from_hood(
     background_tasks: BackgroundTasks,
-    item_status: str = Query(default="all"),
+    item_status: str = Query(default="running,sold,unsuccessful"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
