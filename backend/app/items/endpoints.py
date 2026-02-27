@@ -54,6 +54,7 @@ UPLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
 UPLOAD_JOBS_LOCK = threading.Lock()
 DELETE_JOBS: Dict[str, Dict[str, Any]] = {}
 DELETE_JOBS_LOCK = threading.Lock()
+DELETE_ALL_STATUSES: tuple[str, ...] = ("running", "sold", "unsuccessful")
 
 
 def _account_mode(account: str | None) -> str | None:
@@ -61,6 +62,27 @@ def _account_mode(account: str | None) -> str | None:
         return normalize_account_name(account)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _resolve_delete_all_statuses(item_status: str | None) -> List[str]:
+    raw = str(item_status or "").strip().lower()
+    if raw in ("", "all", "*"):
+        return list(DELETE_ALL_STATUSES)
+
+    tokens = [x.strip().lower() for x in re.split(r"[,\s;]+", raw) if x.strip()]
+    if not tokens:
+        return list(DELETE_ALL_STATUSES)
+
+    allowed = set(DELETE_ALL_STATUSES)
+    invalid = [x for x in tokens if x not in allowed]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported item_status: {', '.join(sorted(set(invalid)))}. "
+            f"Allowed: all, {', '.join(DELETE_ALL_STATUSES)}",
+        )
+
+    return list(dict.fromkeys(tokens))
 
 
 def _load_all_hood_items(
@@ -2008,7 +2030,7 @@ def delete_items_by_source_file_async(
 @router.post("/delete/all_async")
 def delete_all_items_from_hood_async(
     background_tasks: BackgroundTasks,
-    item_status: str = Query(default="running"),
+    item_status: str = Query(default="all"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
@@ -2058,22 +2080,41 @@ def delete_job_status(job_id: str) -> Dict[str, Any]:
 
 
 def _run_delete_all_items_from_hood(
-    item_status: str = Query(default="running"),
+    item_status: str = Query(default="all"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
     progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
-    hood_items = _load_all_hood_items(
-        cfg=cfg,
-        item_status=item_status,
-        group_size=500,
-        progress_cb=progress_cb,
-    )
+    statuses = _resolve_delete_all_statuses(item_status)
+    hood_items: List[Dict[str, Any]] = []
+    found_in_item_list_by_status: Dict[str, int] = {}
+    for idx, status_name in enumerate(statuses, start=1):
+        status_items = _load_all_hood_items(
+            cfg=cfg,
+            item_status=status_name,
+            group_size=500,
+            progress_cb=None,
+        )
+        found_in_item_list_by_status[status_name] = len(status_items)
+        hood_items.extend(status_items)
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "loading_items",
+                    "status": status_name,
+                    "status_index": idx,
+                    "status_count": len(statuses),
+                    "fetched_items": len(hood_items),
+                    "fetched_in_status": len(status_items),
+                }
+            )
+
+    effective_status = ",".join(statuses)
     logger.info(
         "Delete all start: item_status=%s, found_in_item_list=%s, delete_batch_size=%s",
-        item_status,
+        effective_status,
         len(hood_items),
         delete_batch_size,
     )
@@ -2128,14 +2169,16 @@ def _run_delete_all_items_from_hood(
             )
         logger.info(
             "Delete all done: item_status=%s, requested=0, deleted=0, failed=0, missing_item_id=%s",
-            item_status,
+            effective_status,
             missing_item_id,
         )
         return {
             "success": True,
-            "item_status": item_status,
+            "item_status": effective_status,
+            "item_statuses": statuses,
             "account": account_mode,
             "found_in_item_list": len(hood_items),
+            "found_in_item_list_by_status": found_in_item_list_by_status,
             "missing_item_id": missing_item_id,
             "requested": 0,
             "deleted": 0,
@@ -2299,7 +2342,7 @@ def _run_delete_all_items_from_hood(
 
     logger.info(
         "Delete all done: item_status=%s, requested=%s, deleted=%s, failed=%s, missing_item_id=%s",
-        item_status,
+        effective_status,
         len(item_ids),
         deleted,
         failed,
@@ -2319,9 +2362,11 @@ def _run_delete_all_items_from_hood(
         )
     return {
         "success": failed == 0,
-        "item_status": item_status,
+        "item_status": effective_status,
+        "item_statuses": statuses,
         "account": account_mode,
         "found_in_item_list": len(hood_items),
+        "found_in_item_list_by_status": found_in_item_list_by_status,
         "missing_item_id": missing_item_id,
         "requested": len(item_ids),
         "deleted": deleted,
@@ -2334,7 +2379,7 @@ def _run_delete_all_items_from_hood(
 @router.post("/delete/all")
 def delete_all_items_from_hood(
     background_tasks: BackgroundTasks,
-    item_status: str = Query(default="running"),
+    item_status: str = Query(default="all"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
