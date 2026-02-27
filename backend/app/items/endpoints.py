@@ -2071,6 +2071,20 @@ def delete_all_items_from_hood_async(
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
+    return _enqueue_delete_all_job(
+        background_tasks=background_tasks,
+        account=account,
+        item_status=item_status,
+        delete_batch_size=delete_batch_size,
+    )
+
+
+def _enqueue_delete_all_job(
+    background_tasks: BackgroundTasks,
+    account: str | None,
+    item_status: str,
+    delete_batch_size: int,
+) -> Dict[str, Any]:
     _account_mode(account)
     job_id = uuid4().hex
     _set_delete_job(
@@ -2304,15 +2318,19 @@ def _run_delete_all_items_from_hood(
 
 
 @router.delete("/delete/all")
+@router.post("/delete/all")
 def delete_all_items_from_hood(
+    background_tasks: BackgroundTasks,
     item_status: str = Query(default="running"),
     delete_batch_size: int = Query(default=200, ge=1, le=500),
     account: str | None = Query(default=None),
 ) -> Dict[str, Any]:
-    return _run_delete_all_items_from_hood(
+    # Use worker/job flow for live progress and to avoid gateway timeouts on long deletes.
+    return _enqueue_delete_all_job(
+        background_tasks=background_tasks,
+        account=account,
         item_status=item_status,
         delete_batch_size=delete_batch_size,
-        account=account,
     )
 
 
