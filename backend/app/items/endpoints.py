@@ -94,10 +94,13 @@ def _load_all_hood_items(cfg: ApiConfig, item_status: str = "running", group_siz
             break
         if total_records and len(items) >= total_records:
             break
-        if len(page_items) < group_size:
+        # Hood can cap groupSize in response; use the effective page size for pagination.
+        effective_group_size = int(page.get("group_size") or 0)
+        step = effective_group_size if effective_group_size > 0 else len(page_items)
+        if len(page_items) < step:
             break
 
-        start_at += group_size
+        start_at += step
 
     return items
 
