@@ -1595,26 +1595,20 @@ def delete_item_by_item_number(item_number: str, account: str | None = Query(def
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
     cache: Dict[str, Any] = {}
-    split = _split_item_numbers_by_duplicates(cfg=cfg, item_numbers=[item_number], cache=cache)
-    if split["duplicate_numbers"]:
+    resp = _delete_by_item_number(cfg=cfg, item_number=item_number)
+    resp["item_number"] = item_number
+    resp["account"] = account_mode
+    resp["method"] = "itemNumber"
+    if _is_ambiguous_message(str(resp.get("message") or "")) or _is_item_number_ambiguous_error(resp):
         fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=item_number, cache=cache)
         return {
             "item_number": item_number,
             "account": account_mode,
             "method": "itemID",
             "success": bool(fb.get("success")),
+            "primary_delete": resp,
             "fallback_detail": fb,
         }
-
-    xml_delete = build_item_delete(items=[{"itemNumber": item_number}], config=cfg)
-    try:
-        delete_resp_xml = send_request(xml_delete, config=cfg)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    resp = parse_item_delete_response(delete_resp_xml)
-    resp["item_number"] = item_number
-    resp["account"] = account_mode
-    resp["method"] = "itemNumber"
     return resp
 
 
@@ -1638,17 +1632,14 @@ def delete_items_by_item_number(
     account_mode = _account_mode(account)
     cfg = ApiConfig.from_env(account=account_mode)
     cache: Dict[str, Any] = {}
-    split = _split_item_numbers_by_duplicates(cfg=cfg, item_numbers=normalized, cache=cache)
-    unique_numbers: List[str] = split["unique_numbers"]
-    duplicate_numbers: List[str] = split["duplicate_numbers"]
-
     details: List[Dict[str, Any]] = []
     deleted = 0
     failed = 0
 
-    if unique_numbers:
+    for i in range(0, len(normalized), 200):
+        chunk = normalized[i : i + 200]
         xml_delete = build_item_delete(
-            items=[{"itemNumber": item_number} for item_number in unique_numbers],
+            items=[{"itemNumber": item_number} for item_number in chunk],
             config=cfg,
         )
         try:
@@ -1662,7 +1653,7 @@ def delete_items_by_item_number(
                 "errors": [str(exc)],
             }
         parsed["method"] = "itemNumber"
-        parsed["requested_item_numbers"] = unique_numbers
+        parsed["requested_item_numbers"] = chunk
         details.append(parsed)
 
         item_results = parsed.get("items") or []
@@ -1671,15 +1662,15 @@ def delete_items_by_item_number(
             batch_failed = sum(1 for x in item_results if str(x.get("status") or "").lower() == "failed")
             deleted += batch_deleted
             failed += batch_failed
-            unresolved = max(len(unique_numbers) - batch_deleted - batch_failed, 0)
+            unresolved = max(len(chunk) - batch_deleted - batch_failed, 0)
             failed += unresolved
         elif parsed.get("success"):
-            deleted += len(unique_numbers)
+            deleted += len(chunk)
         else:
-            failed += len(unique_numbers)
+            failed += len(chunk)
 
-        # Safety net: if any itemNumber still reported as ambiguous, delete it by itemID.
-        ambiguous_numbers = _ambiguous_failed_item_numbers(parsed=parsed, requested_item_numbers=unique_numbers)
+        # Safety net: if any itemNumber is ambiguous, retry by itemID only for affected numbers.
+        ambiguous_numbers = _ambiguous_failed_item_numbers(parsed=parsed, requested_item_numbers=chunk)
         if ambiguous_numbers:
             recovered_ambiguous = 0
             ambiguous_details: List[Dict[str, Any]] = []
@@ -1700,27 +1691,6 @@ def delete_items_by_item_number(
                     "details": ambiguous_details,
                 }
             )
-
-    if duplicate_numbers:
-        fallback_details: List[Dict[str, Any]] = []
-        recovered = 0
-        for number in duplicate_numbers:
-            fb = _delete_one_item_number_by_item_ids(cfg=cfg, item_number=number, cache=cache)
-            fallback_details.append(fb)
-            if fb.get("success"):
-                recovered += 1
-            else:
-                failed += 1
-        deleted += recovered
-        details.append(
-            {
-                "method": "itemID",
-                "reason": "duplicate_itemNumber",
-                "requested_item_numbers": duplicate_numbers,
-                "recovered": recovered,
-                "details": fallback_details,
-            }
-        )
 
     return {
         "account": account_mode,
