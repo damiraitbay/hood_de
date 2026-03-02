@@ -3,14 +3,14 @@ import requests
 
 # API settings
 API_URL = os.environ.get("HOOD_API_URL", "https://www.hood.de/api.htm").strip()
-USERNAME = os.environ.get("HOOD_API_USER", "").strip()
-PASSWORD = os.environ.get("HOOD_API_PASSWORD", "").strip()  # usually MD5 password hash if required
+USERNAME = os.environ.get("HOOD_API_USER", "XL MOEBEL").strip()
+PASSWORD = os.environ.get("HOOD_API_PASSWORD", "78e14574022b8d09e072a88ca196568f").strip()  # usually MD5 password hash if required
 
 if not USERNAME or not PASSWORD:
     raise ValueError("HOOD_API_USER and HOOD_API_PASSWORD must be set")
 
-start_id = 129262524
-end_id = 129262678
+start_id = 129591863
+end_id = 129591939
 
 items_xml = "".join([f"<item><itemID>{i}</itemID></item>" for i in range(start_id, end_id + 1)])
 

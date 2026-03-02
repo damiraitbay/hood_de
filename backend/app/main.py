@@ -10,6 +10,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from app.items import endpoints as items_endpoints
+from app.facebook_feed import endpoints as facebook_feed_endpoints
 from app.orders import endpoints as orders_endpoints
 from app.shopCategories import endpoints as shop_categories_endpoints
 
@@ -28,6 +29,7 @@ app.add_middleware(
 )
 
 app.include_router(items_endpoints.router, prefix="/items", tags=["Items"])
+app.include_router(facebook_feed_endpoints.router, prefix="/feeds/facebook", tags=["FacebookFeed"])
 app.include_router(orders_endpoints.router, prefix="/orders", tags=["Orders"])
 app.include_router(
     shop_categories_endpoints.router,

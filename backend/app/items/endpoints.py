@@ -6,10 +6,11 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
+from pydantic import BaseModel
 
 from app.config import (
     get_html_folder_for_account,
@@ -23,16 +24,20 @@ from hood_api.config import ApiConfig
 from hood_api.client import send_request
 from hood_api.builders import (
     build_item_delete,
+    build_item_detail,
     build_item_insert,
     build_item_list,
+    build_item_status,
     build_item_update,
     build_item_validate,
 )
 from hood_api.api.parsers import (
     parse_generic_response,
     parse_item_delete_response,
+    parse_item_detail_response,
     parse_item_insert_response,
     parse_item_list_response,
+    parse_item_status_response,
     parse_item_update_response,
 )
 from app.items.prices import load_prices
@@ -253,6 +258,74 @@ def json_files(account: str | None = Query(default=None)) -> Dict[str, Any]:
     return {"account": account_mode, "files": files}
 
 
+@router.get("/last_uploaded")
+def last_uploaded_item(
+    item_status: str = Query(default="running"),
+    detail_level: str = Query(default="image,description"),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    """
+    Берёт первый itemID из itemList (предполагается, что это последний загруженный товар),
+    получает его детальную информацию через itemStatus и пытается найти JSON-файл-источник.
+    """
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+
+    xml_list = build_item_list(
+        item_status=item_status,
+        start_at=1,
+        group_size=1,
+        start_date=None,
+        end_date=None,
+        config=cfg,
+    )
+    try:
+        list_xml = send_request(xml_list, config=cfg)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    list_data = parse_item_list_response(list_xml)
+    list_items = list_data.get("items") or []
+    if not list_items:
+        raise HTTPException(status_code=404, detail=f"No items found in Hood for status={item_status}")
+
+    last_item = dict(list_items[0])
+    last_item_id = str(last_item.get("itemID") or "").strip()
+    if not last_item_id:
+        raise HTTPException(status_code=502, detail="itemID is missing from Hood itemList result")
+
+    xml_status = build_item_status(item_id=last_item_id, detail_level=detail_level, config=cfg)
+    try:
+        status_xml = send_request(xml_status, config=cfg)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    status_data = parse_item_status_response(status_xml)
+    status_items = status_data.get("items") or []
+    hood_item = dict(status_items[0]) if status_items else dict(last_item)
+    if "itemID" not in hood_item:
+        hood_item["itemID"] = last_item_id
+    if "referenceID" not in hood_item and last_item.get("referenceID"):
+        hood_item["referenceID"] = last_item.get("referenceID")
+    if "itemNumber" not in hood_item and last_item.get("itemNumber"):
+        hood_item["itemNumber"] = last_item.get("itemNumber")
+
+    json_folder = get_json_folder_for_account(account_mode)
+    source_raw = _find_raw_item_for_hood_item(hood_item=hood_item, json_folder=json_folder)
+
+    return {
+        "account": account_mode,
+        "item_status": item_status,
+        "hood_item": hood_item,
+        "source": {
+            "found": bool(source_raw),
+            "source_file": source_raw.get("__source_name__") if source_raw else None,
+            "source_path": source_raw.get("__source_file__") if source_raw else None,
+            "local_item_id": source_raw.get("ID") if source_raw else None,
+        },
+    }
+
+
 @router.get("/lookup/{reference_id}")
 def lookup_in_hood(reference_id: str, account: str | None = Query(default=None)) -> Dict[str, Any]:
     """
@@ -296,6 +369,82 @@ def _find_raw_item_by_id(
         if str(it.get("ID", "")) == str(item_id):
             return it
     return None
+
+
+def _extract_internal_id_from_reference(reference_id: str) -> str | None:
+    match = re.fullmatch(r"ART(\d+)", str(reference_id or "").strip(), flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _find_raw_item_for_hood_item(hood_item: Dict[str, Any], json_folder: str) -> Dict[str, Any] | None:
+    hood_item_id = str(hood_item.get("itemID") or "").strip()
+    hood_reference_id = str(hood_item.get("referenceID") or "").strip()
+    hood_item_number = str(hood_item.get("itemNumber") or "").strip()
+
+    internal_id = _extract_internal_id_from_reference(hood_reference_id)
+    if internal_id:
+        found = _find_raw_item_by_id(internal_id, json_folder=json_folder)
+        if found:
+            return found
+
+    for raw in load_all_items(json_folder=json_folder):
+        raw_id = str(raw.get("ID") or "").strip()
+        raw_reference_id = str(raw.get("reference_id") or "").strip()
+        raw_item_number = str(raw.get("item_number") or raw.get("ItemNumber") or "").strip()
+        raw_ean = str(raw.get("EAN") or raw.get("ean") or "").strip()
+
+        if hood_reference_id and raw_reference_id and raw_reference_id == hood_reference_id:
+            return raw
+        if hood_item_number and (
+            (raw_item_number and raw_item_number == hood_item_number)
+            or (raw_ean and raw_ean == hood_item_number)
+        ):
+            return raw
+        if hood_item_id and raw_id and raw_id == hood_item_id:
+            return raw
+
+    return None
+
+
+_ITEM_NOT_FOUND_MARKER = "artikel nicht gefunden"
+
+
+def _item_not_found_in_errors(errors: List[str]) -> bool:
+    lowered = _ITEM_NOT_FOUND_MARKER
+    for err in errors:
+        if lowered in err.lower():
+            return True
+    return False
+
+
+def _exists_in_hood(item_number: str, cfg: ApiConfig) -> Tuple[bool, bool, str | None]:
+    xml_body = build_item_detail(item_id=item_number, config=cfg)
+    try:
+        response_xml = send_request(xml_body, config=cfg)
+    except Exception as exc:
+        return False, False, str(exc)
+
+    data = parse_item_detail_response(response_xml)
+    errors = [str(err or "").strip() for err in data.get("errors") or [] if str(err or "").strip()]
+    if errors:
+        combined = " ".join(errors)
+        if _item_not_found_in_errors(errors):
+            return False, True, combined
+        return False, False, combined
+
+    items = data.get("items") or []
+    if items:
+        return True, False, None
+
+    message = (data.get("message") or "").strip()
+    if message:
+        if _ITEM_NOT_FOUND_MARKER in message.lower():
+            return False, True, message
+        return False, False, message
+
+    return False, True, "itemDetail returned no items"
 
 
 def _build_item_payload_from_norm(norm: Dict[str, Any], api_description: str) -> Dict[str, Any]:
@@ -2483,5 +2632,141 @@ def update_prices(account: str | None = Query(default=None)) -> Dict[str, Any]:
 
 
 
+class UploadMissingRequest(BaseModel):
+    item_ids: List[int]
 
 
+@router.post("/upload_missing")
+def upload_missing_selected(
+    data: UploadMissingRequest,
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    results: List[Dict[str, Any]] = []
+
+    for item_id in data.item_ids:
+        item_id_str = str(item_id)
+        try:
+            resp = _upload_one_by_id(item_id=item_id_str, account=account_mode)
+            results.append(
+                {"item_id": item_id_str, "status": "uploaded", "response": resp}
+            )
+        except HTTPException as exc:
+            results.append(
+                {
+                    "item_id": item_id_str,
+                    "status": "error",
+                    "error": str(exc.detail or exc),
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {"item_id": item_id_str, "status": "error", "error": str(exc)}
+            )
+
+    return {
+        "account": account_mode,
+        "processed": len(results),
+        "results": results,
+    }
+
+
+# ==============================
+# AUTO UPLOAD ALL MISSING
+# ==============================
+
+
+@router.post("/upload_all_missing")
+def upload_all_missing(
+    account: str | None = Query(default=None),
+    limit: int = Query(default=0, ge=0),
+) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    cfg = ApiConfig.from_env(account=account_mode)
+    json_folder = get_json_folder_for_account(account_mode)
+    all_items = load_all_items(json_folder=json_folder)
+    available = len(all_items)
+    server_items = all_items if limit <= 0 else all_items[:limit]
+    checked = len(server_items)
+
+    results: List[Dict[str, Any]] = []
+    for raw in server_items:
+        item_id_local = str(raw.get("ID") or raw.get("id") or "").strip()
+        norm = normalize_item(raw)
+        item_number = str(norm.get("item_number") or norm.get("ean") or "").strip()
+        if not item_number:
+            results.append(
+                {
+                    "item_id_local": item_id_local or None,
+                    "status": "skipped",
+                    "reason": "missing_item_number",
+                }
+            )
+            continue
+
+        exists, should_upload, check_error = _exists_in_hood(item_number, cfg)
+        if exists:
+            continue
+
+        if not should_upload:
+            results.append(
+                {
+                    "item_id_local": item_id_local or None,
+                    "item_number": item_number,
+                    "status": "error",
+                    "error": check_error or "item check failed",
+                }
+            )
+            continue
+
+        if not item_id_local:
+            results.append(
+                {
+                    "item_id_local": None,
+                    "item_number": item_number,
+                    "status": "error",
+                    "error": "local item ID missing",
+                }
+            )
+            continue
+
+        try:
+            resp = _upload_one_by_id(item_id=item_id_local, account=account_mode)
+        except HTTPException as exc:
+            results.append(
+                {
+                    "item_id_local": item_id_local,
+                    "item_number": item_number,
+                    "status": "upload_error",
+                    "error": str(exc.detail or exc),
+                }
+            )
+            continue
+        except Exception as exc:
+            results.append(
+                {
+                    "item_id_local": item_id_local,
+                    "item_number": item_number,
+                    "status": "upload_error",
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        results.append(
+            {
+                "item_id_local": item_id_local,
+                "item_number": item_number,
+                "status": "uploaded",
+                "response": resp,
+            }
+        )
+
+    return {
+        "account": account_mode,
+        "available": available,
+        "checked": checked,
+        "limit": limit,
+        "processed": len(results),
+        "results": results,
+    }

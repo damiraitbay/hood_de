@@ -76,6 +76,11 @@ class Settings:
         os.getenv("HTML_DESCRIPTIONS_FOLDER", ""),
         allow_empty=True,
     )
+    CSV_FOLDER: str = _resolve_path(os.getenv("CSV_FOLDER", "backend/csv"))
+    FACEBOOK_FEED_TOKEN: str = os.getenv("FACEBOOK_FEED_TOKEN", "")
+    FACEBOOK_DEFAULT_BRAND: str = os.getenv("FACEBOOK_DEFAULT_BRAND", "")
+    FACEBOOK_DEFAULT_CURRENCY: str = os.getenv("FACEBOOK_DEFAULT_CURRENCY", "EUR")
+    FACEBOOK_PRODUCT_LINK_BASE: str = os.getenv("FACEBOOK_PRODUCT_LINK_BASE", "")
 
     DEBUG: bool = os.getenv("DEBUG", "0") in ("1", "true", "True")
     MAX_PARALLEL_UPLOADS: int = int(os.getenv("MAX_PARALLEL_UPLOADS", "5"))
@@ -128,3 +133,17 @@ def get_price_sheet_for_account(account: str | None) -> str:
     if mode == "jvmoebel":
         return _resolve_path(os.getenv("PRICE_SHEET_PATH_JV", ""), allow_empty=True)
     return settings.PRICE_SHEET_PATH
+
+
+def get_csv_folder_for_account(account: str | None) -> str:
+    mode = normalize_account_name(account)
+    if mode == "xlmoebel":
+        return _resolve_path(
+            os.getenv("CSV_FOLDER_XL", "/var/lib/productbaseapi/data/XL/XL_LISTER/XL_NEW/csv")
+        )
+    if mode == "jvmoebel":
+        return _resolve_path(
+            os.getenv("CSV_FOLDER_JV", "/var/lib/productbaseapi/data/JV/JV_LISTER/JV_NEW/csv")
+        )
+    return settings.CSV_FOLDER
+
