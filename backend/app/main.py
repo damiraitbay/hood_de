@@ -15,7 +15,7 @@ from app.orders import endpoints as orders_endpoints
 from app.shopCategories import endpoints as shop_categories_endpoints
 
 
-app = FastAPI(title="Hood Api Manager")
+app = FastAPI(title="Hood Api Manager", root_path="/api")
 
 app.add_middleware(
     CORSMiddleware,
