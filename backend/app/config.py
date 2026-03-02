@@ -76,7 +76,7 @@ class Settings:
         os.getenv("HTML_DESCRIPTIONS_FOLDER", ""),
         allow_empty=True,
     )
-    CSV_FOLDER: str = _resolve_path(os.getenv("CSV_FOLDER", "backend/csv"))
+    CSV_FOLDER: str = _resolve_path(os.getenv("CSV_FOLDER", "csv"))
     FACEBOOK_FEED_TOKEN: str = os.getenv("FACEBOOK_FEED_TOKEN", "")
     FACEBOOK_DEFAULT_BRAND: str = os.getenv("FACEBOOK_DEFAULT_BRAND", "")
     FACEBOOK_DEFAULT_CURRENCY: str = os.getenv("FACEBOOK_DEFAULT_CURRENCY", "EUR")
@@ -146,4 +146,3 @@ def get_csv_folder_for_account(account: str | None) -> str:
             os.getenv("CSV_FOLDER_JV", "/var/lib/productbaseapi/data/JV/JV_LISTER/JV_NEW/csv")
         )
     return settings.CSV_FOLDER
-
