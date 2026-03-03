@@ -163,6 +163,19 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _process_uvp(price: float) -> float:
+    # Keep UVP brackets identical to hood_api/builders.py.
+    if price > 5000:
+        value = price * 1.10
+    elif 2500 <= price <= 4999:
+        value = price * 1.18
+    elif 1000 <= price <= 2499:
+        value = price * 1.25
+    else:
+        value = price * 1.35
+    return round(value, 2)
+
+
 def _resolve_currency(raw_currency: Any) -> str:
     currency = _normalize_value(raw_currency).upper()
     if not currency:
@@ -329,10 +342,12 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     buy_now_price = _to_decimal(normalized.get("sofortkaufenpreis"))
     start_price = _to_decimal(normalized.get("startpreis"))
     amount = buy_now_price if buy_now_price > 0 else start_price
-    sale_amount = start_price if buy_now_price > 0 and start_price > buy_now_price else 0.0
+    uvp_amount = _process_uvp(amount) if amount > 0 else 0.0
+    price_amount = uvp_amount if uvp_amount > amount else amount
+    sale_amount = amount if uvp_amount > amount else 0.0
 
     currency = _resolve_currency(normalized.get("currency"))
-    price = f"{amount:.2f} {currency}"
+    price = f"{price_amount:.2f} {currency}"
     sale_price = f"{sale_amount:.2f} {currency}" if sale_amount > 0 else ""
 
     gtin = _extract_gtin_like(normalized)
