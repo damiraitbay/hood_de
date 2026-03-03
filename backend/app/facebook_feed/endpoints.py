@@ -437,13 +437,7 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
         or _spec_value(specs_index, ("marke", "brand"))
         or settings.FACEBOOK_DEFAULT_BRAND
     )
-    item_group_id = (
-        normalized.get("variantgroup")
-        or normalized.get("item_group_id")
-        or normalized.get("kollektion")
-        or normalized.get("shopkat")
-        or ""
-    )
+    item_group_id = ""
     category_id = normalized.get("categoryid") or ""
     color = normalized.get("farbe") or normalized.get("color") or _spec_value(specs_index, ("farbe", "color"))
     size = (
