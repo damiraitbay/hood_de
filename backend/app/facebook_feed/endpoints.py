@@ -172,11 +172,13 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     price = f"{amount:.2f} {currency}"
     sale_price = f"{sale_amount:.2f} {currency}" if sale_amount > 0 else ""
 
+    # Facebook feed requires stable product ids; prefer EAN when available.
     product_id = (
-        normalized.get("id")
+        normalized.get("ean")
+        or normalized.get("gtin")
+        or normalized.get("id")
         or normalized.get("itemnumber")
         or normalized.get("item_number")
-        or normalized.get("ean")
         or fallback_id
     )
 
