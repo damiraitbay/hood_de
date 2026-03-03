@@ -117,6 +117,23 @@ def _extract_gtin_like(normalized: Dict[str, str]) -> str:
     return ""
 
 
+def _extract_gtin_from_item_specifics(raw: str) -> str:
+    if not raw:
+        return ""
+
+    # Example source fragment:
+    # <Name><![CDATA[EAN]]></Name><Value><![CDATA[4069424130232]]></Value>
+    patterns = [
+        r"<Name><!\[CDATA\[EAN\]\]></Name>\s*<Value><!\[CDATA\[(\d{8}|\d{12}|\d{13}|\d{14})\]\]></Value>",
+        r"<Name>\s*EAN\s*</Name>\s*<Value>\s*(\d{8}|\d{12}|\d{13}|\d{14})\s*</Value>",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def _to_decimal(value: Any) -> float:
     raw = _normalize_value(value)
     if not raw:
@@ -208,6 +225,10 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     sale_price = f"{sale_amount:.2f} {currency}" if sale_amount > 0 else ""
 
     gtin = _extract_gtin_like(normalized)
+    if not gtin:
+        gtin = _extract_gtin_from_item_specifics(
+            normalized.get("customitemspecifics", "") or normalized.get("translateddescription", "")
+        )
 
     # Facebook feed requires stable product ids; prefer GTIN/EAN when available.
     product_id = (
