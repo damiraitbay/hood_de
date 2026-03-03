@@ -2,7 +2,7 @@ import csv
 import io
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query
@@ -21,6 +21,7 @@ FACEBOOK_HEADERS = [
     "price",
     "link",
     "image_link",
+    "additional_image_link",
     "brand",
     "google_product_category",
     "fb_product_category",
@@ -182,7 +183,7 @@ def _split_image_urls(raw_value: Any) -> List[str]:
     raw = _normalize_value(raw_value)
     if not raw:
         return []
-    parts = re.split(r"[|,\s]+", raw)
+    parts = re.split(r"[|,;\s]+", raw)
     result: List[str] = []
     seen: set[str] = set()
     for part in parts:
@@ -196,12 +197,122 @@ def _split_image_urls(raw_value: Any) -> List[str]:
     return result
 
 
+def _dedupe_urls(urls: Iterable[str]) -> List[str]:
+    result: List[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        key = (url or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
 def _compact_text(raw_value: Any, fallback: str = "") -> str:
     text = _normalize_value(raw_value) or fallback
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > 5000:
         return text[:5000]
     return text
+
+
+def _clean_source_description(raw_value: Any) -> str:
+    text = _normalize_value(raw_value)
+    if not text:
+        return ""
+    text = re.sub(r"%0d%0a|%0a|%0d", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<-?\s*stammbeschreibung\s*->", "", text, flags=re.IGNORECASE)
+    return _compact_text(text)
+
+
+def _parse_item_specifics(raw_value: str) -> List[Tuple[str, str]]:
+    if not raw_value:
+        return []
+
+    result: List[Tuple[str, str]] = []
+    blocks = re.findall(r"<NameValueList>(.*?)</NameValueList>", raw_value, flags=re.IGNORECASE | re.DOTALL)
+    for block in blocks:
+        name_match = re.search(
+            r"<Name><!\[CDATA\[(.*?)\]\]></Name>|<Name>\s*(.*?)\s*</Name>",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not name_match:
+            continue
+        name = _compact_text(name_match.group(1) or name_match.group(2))
+        if not name:
+            continue
+
+        values = re.findall(
+            r"<Value><!\[CDATA\[(.*?)\]\]></Value>|<Value>\s*(.*?)\s*</Value>",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        cleaned_values: List[str] = []
+        seen: set[str] = set()
+        for left, right in values:
+            value = _compact_text(left or right)
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned_values.append(value)
+
+        if not cleaned_values:
+            continue
+
+        result.append((name, ", ".join(cleaned_values)))
+
+    return result
+
+
+def _build_description_from_specs(normalized: Dict[str, str], title: str) -> str:
+    base_description = _clean_source_description(normalized.get("description", ""))
+    raw_specs = normalized.get("customitemspecifics", "") or normalized.get("translateddescription", "")
+    specs = _parse_item_specifics(raw_specs)
+    if not specs:
+        return _compact_text(base_description, fallback=title)
+
+    by_name = {name.lower(): (name, value) for name, value in specs}
+    preferred = [
+        "marke",
+        "produktart",
+        "farbe",
+        "material",
+        "zimmer",
+        "stil",
+        "breite",
+        "länge",
+        "höhe",
+        "ean",
+    ]
+
+    selected: List[Tuple[str, str]] = []
+    used: set[str] = set()
+    for key in preferred:
+        if key in by_name:
+            selected.append(by_name[key])
+            used.add(key)
+
+    for name, value in specs:
+        key = name.lower()
+        if key in used:
+            continue
+        selected.append((name, value))
+        used.add(key)
+        if len(selected) >= 8:
+            break
+
+    parts: List[str] = []
+    if base_description and base_description.lower() != title.lower():
+        parts.append(base_description)
+    for name, value in selected[:8]:
+        parts.append(f"{name}: {value}")
+
+    return _compact_text(" | ".join(parts), fallback=title)
 
 
 def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
@@ -239,14 +350,16 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
         or fallback_id
     )
 
-    image_candidates = (
+    image_candidates = _dedupe_urls(
         _split_image_urls(normalized.get("pictureurl"))
+        + _split_image_urls(normalized.get("pictureurls"))
         + _split_image_urls(normalized.get("galleryurl"))
         + _split_image_urls(normalized.get("image_link"))
     )
     image_link = image_candidates[0] if image_candidates else ""
+    additional_image_link = ",".join(image_candidates[1:]) if len(image_candidates) > 1 else ""
 
-    description = _compact_text(normalized.get("description"), fallback=title)
+    description = _build_description_from_specs(normalized, title=title)
     brand = normalized.get("marke") or settings.FACEBOOK_DEFAULT_BRAND
     item_group_id = normalized.get("variantgroup") or normalized.get("item_group_id") or ""
     category_id = normalized.get("categoryid") or ""
@@ -267,6 +380,7 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
         "price": price,
         "link": _build_product_link(product_id),
         "image_link": image_link,
+        "additional_image_link": additional_image_link,
         "brand": brand,
         "google_product_category": "",
         "fb_product_category": "",
