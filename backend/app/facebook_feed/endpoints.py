@@ -82,6 +82,41 @@ def _normalize_value(value: Any) -> str:
     return str(value or "").strip().strip('"')
 
 
+def _first_non_empty(normalized: Dict[str, str], keys: Iterable[str]) -> str:
+    for key in keys:
+        value = normalized.get(key)
+        if value:
+            return value
+    return ""
+
+
+def _extract_gtin_like(normalized: Dict[str, str]) -> str:
+    # Support common source header variants: ean, ean_code, gtin, barcode, etc.
+    raw = _first_non_empty(
+        normalized,
+        (
+            "ean",
+            "ean_code",
+            "ean code",
+            "ean13",
+            "ean-13",
+            "gtin",
+            "gtin13",
+            "gtin14",
+            "barcode",
+            "bar code",
+            "upc",
+        ),
+    )
+    if not raw:
+        return ""
+    digits = re.sub(r"\D+", "", raw)
+    # Typical accepted GTIN lengths.
+    if len(digits) in (8, 12, 13, 14):
+        return digits
+    return ""
+
+
 def _to_decimal(value: Any) -> float:
     raw = _normalize_value(value)
     if not raw:
@@ -172,10 +207,11 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     price = f"{amount:.2f} {currency}"
     sale_price = f"{sale_amount:.2f} {currency}" if sale_amount > 0 else ""
 
-    # Facebook feed requires stable product ids; prefer EAN when available.
+    gtin = _extract_gtin_like(normalized)
+
+    # Facebook feed requires stable product ids; prefer GTIN/EAN when available.
     product_id = (
-        normalized.get("ean")
-        or normalized.get("gtin")
+        gtin
         or normalized.get("id")
         or normalized.get("itemnumber")
         or normalized.get("item_number")
@@ -191,7 +227,6 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
 
     description = _compact_text(normalized.get("description"), fallback=title)
     brand = normalized.get("marke") or settings.FACEBOOK_DEFAULT_BRAND
-    gtin = normalized.get("ean") or normalized.get("gtin")
     item_group_id = normalized.get("variantgroup") or normalized.get("item_group_id") or ""
     category_id = normalized.get("categoryid") or ""
     color = normalized.get("farbe") or ""
