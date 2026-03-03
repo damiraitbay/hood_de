@@ -163,6 +163,10 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _is_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _process_uvp(price: float) -> float:
     # Keep UVP brackets identical to hood_api/builders.py.
     if price > 5000:
@@ -282,10 +286,59 @@ def _parse_item_specifics(raw_value: str) -> List[Tuple[str, str]]:
     return result
 
 
-def _build_description_from_specs(normalized: Dict[str, str], title: str) -> str:
+def _build_specs_index(specs: List[Tuple[str, str]]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for name, value in specs:
+        key = name.lower().strip()
+        if key and value and key not in out:
+            out[key] = value
+    return out
+
+
+def _spec_value(specs_index: Dict[str, str], keys: Iterable[str]) -> str:
+    for key in keys:
+        value = specs_index.get(str(key).lower().strip())
+        if value:
+            return value
+    return ""
+
+
+def _normalize_gender(raw_value: str) -> str:
+    text = str(raw_value or "").strip().lower()
+    if not text:
+        return ""
+    if any(token in text for token in ("female", "frau", "women", "damen", "weiblich")):
+        return "female"
+    if any(token in text for token in ("male", "mann", "men", "herren")):
+        return "male"
+    if any(token in text for token in ("unisex", "erwachsene", "adult")):
+        return "unisex"
+    return ""
+
+
+def _normalize_age_group(raw_value: str) -> str:
+    text = str(raw_value or "").strip().lower()
+    if not text:
+        return ""
+    if any(token in text for token in ("adult", "erwachsene")):
+        return "adult"
+    if any(token in text for token in ("all ages", "alle")):
+        return "all ages"
+    if any(token in text for token in ("infant", "baby")):
+        return "infant"
+    if "newborn" in text:
+        return "newborn"
+    if "toddler" in text:
+        return "toddler"
+    if any(token in text for token in ("kids", "kinder")):
+        return "kids"
+    if any(token in text for token in ("teen", "jugend")):
+        return "teen"
+    return ""
+
+
+def _build_description_from_specs(normalized: Dict[str, str], title: str, specs: List[Tuple[str, str]]) -> str:
     base_description = _clean_source_description(normalized.get("description", ""))
-    raw_specs = normalized.get("customitemspecifics", "") or normalized.get("translateddescription", "")
-    specs = _parse_item_specifics(raw_specs)
     if not specs:
         return _compact_text(base_description, fallback=title)
 
@@ -355,6 +408,9 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
         gtin = _extract_gtin_from_item_specifics(
             normalized.get("customitemspecifics", "") or normalized.get("translateddescription", "")
         )
+    raw_specs = normalized.get("customitemspecifics", "") or normalized.get("translateddescription", "")
+    specs = _parse_item_specifics(raw_specs)
+    specs_index = _build_specs_index(specs)
 
     # Facebook feed requires stable product ids; prefer GTIN/EAN when available.
     product_id = (
@@ -374,16 +430,61 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     image_link = image_candidates[0] if image_candidates else ""
     additional_image_link = ",".join(image_candidates[1:]) if len(image_candidates) > 1 else ""
 
-    description = _build_description_from_specs(normalized, title=title)
-    brand = normalized.get("marke") or settings.FACEBOOK_DEFAULT_BRAND
-    item_group_id = normalized.get("variantgroup") or normalized.get("item_group_id") or ""
+    description = _build_description_from_specs(normalized, title=title, specs=specs)
+    brand = (
+        normalized.get("marke")
+        or normalized.get("brand")
+        or _spec_value(specs_index, ("marke", "brand"))
+        or settings.FACEBOOK_DEFAULT_BRAND
+    )
+    item_group_id = (
+        normalized.get("variantgroup")
+        or normalized.get("item_group_id")
+        or normalized.get("kollektion")
+        or normalized.get("shopkat")
+        or ""
+    )
     category_id = normalized.get("categoryid") or ""
-    color = normalized.get("farbe") or ""
-    size = normalized.get("groesse") or normalized.get("größe") or normalized.get("size") or ""
-    material = normalized.get("material") or ""
-    pattern = normalized.get("muster") or ""
-    style = normalized.get("stil") or normalized.get("style") or ""
-    shipping_weight = normalized.get("shippingweight") or normalized.get("gewicht") or ""
+    color = normalized.get("farbe") or normalized.get("color") or _spec_value(specs_index, ("farbe", "color"))
+    size = (
+        normalized.get("groesse")
+        or normalized.get("größe")
+        or normalized.get("size")
+        or _spec_value(specs_index, ("groesse", "größe", "size", "liegeflaeche", "liegefläche"))
+    )
+    material = normalized.get("material") or _spec_value(specs_index, ("material",))
+    pattern = normalized.get("muster") or normalized.get("pattern") or _spec_value(specs_index, ("muster", "pattern"))
+    style = normalized.get("stil") or normalized.get("style") or _spec_value(specs_index, ("stil", "style"))
+    shipping_weight = (
+        normalized.get("shippingweight")
+        or normalized.get("gewicht")
+        or _spec_value(specs_index, ("gewicht", "versandgewicht", "weight", "shipping weight"))
+    )
+    gender = _normalize_gender(
+        normalized.get("gender") or _spec_value(specs_index, ("geschlecht", "gender", "abteilung"))
+    )
+    age_group = _normalize_age_group(
+        normalized.get("age_group") or _spec_value(specs_index, ("altersgruppe", "age group", "abteilung"))
+    )
+    google_product_category = (
+        normalized.get("google_product_category")
+        or normalized.get("googleproductcategory")
+        or _spec_value(specs_index, ("produktart", "produkttyp", "kategorie"))
+    )
+    fb_product_category = (
+        normalized.get("fb_product_category")
+        or normalized.get("facebook_product_category")
+        or _spec_value(specs_index, ("produktart", "kategorie"))
+    )
+    video_url = normalized.get("video[0].url") or normalized.get("videourl") or normalized.get("video_url") or ""
+    video_tag = normalized.get("video[0].tag[0]") or normalized.get("videotag") or ""
+    second_tag = normalized.get("category2id") or normalized.get("shopcat2") or normalized.get("kollektion") or ""
+    shipping_cost = _to_decimal(normalized.get("ship_shippinghandlingcosts") or normalized.get("ship_shippingrate"))
+    shipping = ""
+    if shipping_cost > 0:
+        shipping = f"DE:::{shipping_cost:.2f} {currency}"
+    elif _is_truthy(normalized.get("ship_sellerpays")):
+        shipping = f"DE:::0.00 {currency}"
     quantity_to_sell = str(quantity) if quantity > 0 else ""
 
     return {
@@ -397,25 +498,25 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
         "image_link": image_link,
         "additional_image_link": additional_image_link,
         "brand": brand,
-        "google_product_category": "",
-        "fb_product_category": "",
+        "google_product_category": google_product_category,
+        "fb_product_category": fb_product_category,
         "quantity_to_sell_on_facebook": quantity_to_sell,
         "sale_price": sale_price,
         "sale_price_effective_date": "",
         "item_group_id": item_group_id,
-        "gender": "",
+        "gender": gender,
         "color": color,
         "size": size,
-        "age_group": "",
+        "age_group": age_group,
         "material": material,
         "pattern": pattern,
-        "shipping": "",
+        "shipping": shipping,
         "shipping_weight": shipping_weight,
-        "video[0].url": "",
-        "video[0].tag[0]": "",
+        "video[0].url": video_url,
+        "video[0].tag[0]": video_tag,
         "gtin": gtin or "",
         "product_tags[0]": category_id,
-        "product_tags[1]": "",
+        "product_tags[1]": second_tag,
         "style[0]": style,
     }
 
