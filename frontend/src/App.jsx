@@ -24,6 +24,7 @@ export default function App() {
   const [deleteItemNumbers, setDeleteItemNumbers] = useState("");
   const [loading, setLoading] = useState(false);
   const [rawOutput, setRawOutput] = useState("");
+  const [processLogs, setProcessLogs] = useState([]);
   const [lastActionAt, setLastActionAt] = useState(null);
   const [activeUpdateJobId, setActiveUpdateJobId] = useState("");
   const [connectionOk, setConnectionOk] = useState(false);
@@ -46,6 +47,15 @@ export default function App() {
 
   function setUiStatus(type, title, text) {
     setStatus({ type, title, text });
+  }
+
+  function pushProcessLog(processName, message) {
+    const ts = new Date().toLocaleTimeString();
+    const line = `[${ts}] [${processName}] ${message}`;
+    setProcessLogs((prev) => {
+      const next = [...prev, line];
+      return next.slice(-300);
+    });
   }
 
   function withAccount(url) {
@@ -90,6 +100,7 @@ export default function App() {
       const updatedItems = Number(progress?.updated || data?.result?.updated || 0);
       const failedItems = Number(progress?.failed || data?.result?.failed || 0);
       const phase = String(progress?.phase || "");
+      pushProcessLog("update_async", `status=${statusValue || "-"} phase=${phase || "-"}`);
 
       if (statusValue === "queued") {
         setUiStatus("loading", "Async update", `Queued. Job: ${jobId}`);
@@ -150,6 +161,7 @@ export default function App() {
       const successItems = Number(progress?.success || 0);
       const failedItems = Number(progress?.failed || 0);
       const phase = String(progress?.phase || "");
+      pushProcessLog("upload_async", `status=${statusValue || "-"} phase=${phase || "-"}`);
 
       if (statusValue === "queued") {
         setUiStatus("loading", "Async upload", `Queued. Job: ${jobId}`);
@@ -209,6 +221,7 @@ export default function App() {
       const deleted = deletedRaw == null ? null : Number(deletedRaw);
       const failed = failedRaw == null ? null : Number(failedRaw);
       const phase = String(progress?.phase || "");
+      pushProcessLog("delete_async", `status=${statusValue || "-"} phase=${phase || "-"}`);
 
       if (statusValue === "queued") {
         setUiStatus("loading", "Async delete", `Queued. Job: ${jobId}`);
@@ -279,6 +292,7 @@ export default function App() {
       const statusValue = String(data?.status || "");
       const progress = data?.progress || {};
       const phase = String(progress?.phase || "");
+      pushProcessLog("uploaded_split_async", `status=${statusValue || "-"} phase=${phase || "-"}`);
       const statusesDone = Number(progress?.statuses_done || 0);
       const statusesTotal = Number(progress?.statuses_total || 0);
       const processedItems = Number(progress?.processed_items || 0);
@@ -334,6 +348,8 @@ export default function App() {
   async function startDeleteAsync(url, label) {
     setLoading(true);
     setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("delete_async", "starting job");
     setUiStatus("loading", label, "Starting async delete...");
     try {
       const res = await fetch(url, {
@@ -357,6 +373,7 @@ export default function App() {
       }
       setActiveUpdateJobId(jobId);
       stopUpdatePolling();
+      pushProcessLog("delete_async", `queued job_id=${jobId}`);
       setUiStatus("loading", label, `Queued. Job: ${jobId}`);
       await pollDeleteJob(jobId);
       updatePollTimerRef.current = setInterval(() => {
@@ -372,6 +389,8 @@ export default function App() {
   async function call(method, url, label, payload = null) {
     setLoading(true);
     setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("request", `start ${method} ${url}`);
     setUiStatus("loading", label, "Operation in progress...");
     try {
       const res = await fetch(url, {
@@ -386,13 +405,16 @@ export default function App() {
       setLastActionAt(Date.now());
 
       if (res.ok) {
+        pushProcessLog("request", `done ${method} ${url} -> HTTP ${res.status}`);
         setUiStatus("success", label, summarizeData(data, "Done"));
       } else {
+        pushProcessLog("request", `failed ${method} ${url} -> HTTP ${res.status}`);
         setUiStatus("error", label, `HTTP ${res.status}. Open technical details below.`);
       }
       return { ok: res.ok, status: res.status, data };
     } catch (e) {
       const msg = String(e);
+      pushProcessLog("request", `error ${method} ${url}: ${msg}`);
       setRawOutput(msg);
       setLastActionAt(Date.now());
       setUiStatus("error", label, msg);
@@ -553,6 +575,8 @@ export default function App() {
     const url = withSource(`${endpoints.uploadAsync}?limit=0`);
     setLoading(true);
     setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("upload_async", `starting from source_file=${sourceFile}`);
     setUiStatus("loading", "Async upload", `Starting async upload for ${sourceFile}...`);
     try {
       const res = await fetch(url, {
@@ -577,6 +601,7 @@ export default function App() {
       }
       setActiveUpdateJobId(jobId);
       stopUpdatePolling();
+      pushProcessLog("upload_async", `queued job_id=${jobId}`);
       setUiStatus("loading", "Async upload", `Queued. Job: ${jobId}`);
       await pollUploadJob(jobId);
       updatePollTimerRef.current = setInterval(() => {
@@ -598,6 +623,8 @@ export default function App() {
     const url = withAccount(`${endpoints.uploadManyAsync}?limit=0`);
     setLoading(true);
     setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("upload_many_async", `starting with files=${sourceFilesMulti.length}`);
     setUiStatus("loading", "Async upload", `Starting async upload for ${sourceFilesMulti.length} file(s)...`);
     try {
       const res = await fetch(url, {
@@ -623,6 +650,7 @@ export default function App() {
       }
       setActiveUpdateJobId(jobId);
       stopUpdatePolling();
+      pushProcessLog("upload_many_async", `queued job_id=${jobId}`);
       setUiStatus("loading", "Async upload", `Queued. Job: ${jobId}`);
       await pollUploadJob(jobId);
       updatePollTimerRef.current = setInterval(() => {
@@ -644,6 +672,8 @@ export default function App() {
     const url = withSource(`${endpoints.updateAsync}?limit=0`);
     setLoading(true);
     setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("update_async", `starting from source_file=${sourceFile}`);
     setUiStatus("loading", "Async update", `Starting async update for ${sourceFile}...`);
     try {
       const res = await fetch(url, {
@@ -668,6 +698,7 @@ export default function App() {
       }
       setActiveUpdateJobId(jobId);
       stopUpdatePolling();
+      pushProcessLog("update_async", `queued job_id=${jobId}`);
       setUiStatus("loading", "Async update", `Queued. Job: ${jobId}`);
       await pollUpdateJob(jobId);
       updatePollTimerRef.current = setInterval(() => {
@@ -694,6 +725,8 @@ export default function App() {
     const url = withAccount(endpoints.uploadedSplitAsync);
     setLoading(true);
     setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("uploaded_split_async", "starting job");
     setUiStatus("loading", "Uploaded split", "Starting async split...");
     try {
       const res = await fetch(url, {
@@ -718,6 +751,7 @@ export default function App() {
       }
       setActiveUpdateJobId(jobId);
       stopUpdatePolling();
+      pushProcessLog("uploaded_split_async", `queued job_id=${jobId}`);
       setUiStatus("loading", "Uploaded split", `Queued. Job: ${jobId}`);
       await pollUploadedSplitJob(jobId);
       updatePollTimerRef.current = setInterval(() => {
@@ -1079,6 +1113,7 @@ export default function App() {
             {activeUpdateJobId ? <div className="hint">Active async job: <code>{activeUpdateJobId}</code></div> : null}
             <details className="advanced">
               <summary>Technical details</summary>
+              <pre className="output">{processLogs.length ? processLogs.join("\n") : "-"}</pre>
               <pre className="output">{rawOutput || "-"}</pre>
             </details>
             <div className="hint">
