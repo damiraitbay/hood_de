@@ -1566,13 +1566,15 @@ def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str,
     json_folder = get_json_folder_for_account(account_mode)
 
     try:
-        uploaded, not_uploaded = split_uploaded_items(account=account_mode, json_folder=json_folder)
+        uploaded, not_uploaded, warnings = split_uploaded_items(account=account_mode, json_folder=json_folder)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
     return {
         "account": account_mode,
         "json_folder": json_folder,
+        "partial": bool(warnings),
+        "warnings": warnings,
         "uploaded_count": len(uploaded),
         "not_uploaded_count": len(not_uploaded),
         "uploaded": uploaded,

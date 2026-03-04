@@ -1,20 +1,24 @@
 from typing import Any, Dict, List, Set, Tuple
+import xml.etree.ElementTree as ET
 
 from app.items.storage import load_all_items
+from app.logger import get_logger
 from hood_api.api.parsers import parse_item_list_response
 from hood_api.builders import build_item_list
 from hood_api.client import send_request
 from hood_api.config import ApiConfig
 
 _ITEM_STATUSES: Tuple[str, ...] = ("running", "sold", "unsuccessful")
+logger = get_logger("items")
 
 
 def get_server_items(json_folder: str | None = None) -> List[Dict[str, Any]]:
     return load_all_items(json_folder=json_folder)
 
 
-def _load_hood_reference_ids(cfg: ApiConfig, group_size: int = 500) -> Set[str]:
+def _load_hood_reference_ids(cfg: ApiConfig, group_size: int = 500) -> Tuple[Set[str], List[Dict[str, Any]]]:
     reference_ids: Set[str] = set()
+    warnings: List[Dict[str, Any]] = []
 
     for item_status in _ITEM_STATUSES:
         start_at = 1
@@ -27,11 +31,60 @@ def _load_hood_reference_ids(cfg: ApiConfig, group_size: int = 500) -> Set[str]:
                 end_date=None,
                 config=cfg,
             )
-            response_xml = send_request(xml_body, config=cfg)
-            page = parse_item_list_response(response_xml)
+            try:
+                response_xml = send_request(xml_body, config=cfg)
+                page = parse_item_list_response(response_xml)
+            except ET.ParseError as exc:
+                snippet = (response_xml[:200] if "response_xml" in locals() else "").replace("\n", " ").strip()
+                warnings.append(
+                    {
+                        "status": item_status,
+                        "start_at": start_at,
+                        "reason": f"non_xml_response: {exc}",
+                        "response_snippet": snippet,
+                    }
+                )
+                logger.warning(
+                    "uploaded_split: parse error for status=%s start_at=%s: %s; snippet=%s",
+                    item_status,
+                    start_at,
+                    exc,
+                    snippet,
+                )
+                break
+            except Exception as exc:
+                warnings.append(
+                    {
+                        "status": item_status,
+                        "start_at": start_at,
+                        "reason": f"request_error: {exc}",
+                    }
+                )
+                logger.warning(
+                    "uploaded_split: request error for status=%s start_at=%s: %s",
+                    item_status,
+                    start_at,
+                    exc,
+                )
+                break
+
             errors = page.get("errors") or []
             if errors:
-                raise RuntimeError("; ".join(str(err) for err in errors))
+                warnings.append(
+                    {
+                        "status": item_status,
+                        "start_at": start_at,
+                        "reason": "api_errors",
+                        "errors": [str(err) for err in errors],
+                    }
+                )
+                logger.warning(
+                    "uploaded_split: hood api errors for status=%s start_at=%s: %s",
+                    item_status,
+                    start_at,
+                    "; ".join(str(err) for err in errors),
+                )
+                break
 
             items = page.get("items") or []
             for hood_item in items:
@@ -50,15 +103,15 @@ def _load_hood_reference_ids(cfg: ApiConfig, group_size: int = 500) -> Set[str]:
                 break
             start_at += step
 
-    return reference_ids
+    return reference_ids, warnings
 
 
 def split_uploaded_items(
     account: str | None = None,
     json_folder: str | None = None,
-) -> Tuple[List[str], List[Dict[str, Any]]]:
+) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
     cfg = ApiConfig.from_env(account=account)
-    hood_reference_ids = _load_hood_reference_ids(cfg=cfg)
+    hood_reference_ids, warnings = _load_hood_reference_ids(cfg=cfg)
     uploaded: List[str] = []
     not_uploaded: List[Dict[str, Any]] = []
 
@@ -74,5 +127,5 @@ def split_uploaded_items(
         else:
             not_uploaded.append(item)
 
-    return uploaded, not_uploaded
+    return uploaded, not_uploaded, warnings
 
