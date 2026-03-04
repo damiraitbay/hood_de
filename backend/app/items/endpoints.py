@@ -1575,7 +1575,10 @@ def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str,
     json_folder = get_json_folder_for_account(account_mode)
 
     try:
-        uploaded, not_uploaded, warnings = split_uploaded_items(account=account_mode, json_folder=json_folder)
+        uploaded, not_uploaded, warnings, not_uploaded_file = split_uploaded_items(
+            account=account_mode,
+            json_folder=json_folder,
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1585,6 +1588,7 @@ def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str,
         "match_by": "item_number",
         "partial": bool(warnings),
         "warnings": warnings,
+        "not_uploaded_file": not_uploaded_file,
         "uploaded_count": len(uploaded),
         "not_uploaded_count": len(not_uploaded),
         "uploaded": uploaded,
@@ -1607,7 +1611,7 @@ def _run_items_uploaded_split_job(job_id: str, account: str | None) -> None:
     try:
         account_mode = _account_mode(account)
         json_folder = get_json_folder_for_account(account_mode)
-        uploaded, not_uploaded, warnings = split_uploaded_items(
+        uploaded, not_uploaded, warnings, not_uploaded_file = split_uploaded_items(
             account=account_mode,
             json_folder=json_folder,
             progress_cb=progress_cb,
@@ -1618,6 +1622,7 @@ def _run_items_uploaded_split_job(job_id: str, account: str | None) -> None:
             "match_by": "item_number",
             "partial": bool(warnings),
             "warnings": warnings,
+            "not_uploaded_file": not_uploaded_file,
             "uploaded_count": len(uploaded),
             "not_uploaded_count": len(not_uploaded),
             "uploaded": uploaded,
