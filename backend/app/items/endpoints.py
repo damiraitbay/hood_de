@@ -60,6 +60,8 @@ UPLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
 UPLOAD_JOBS_LOCK = threading.Lock()
 DELETE_JOBS: Dict[str, Dict[str, Any]] = {}
 DELETE_JOBS_LOCK = threading.Lock()
+SPLIT_JOBS: Dict[str, Dict[str, Any]] = {}
+SPLIT_JOBS_LOCK = threading.Lock()
 DELETE_ALL_STATUSES: tuple[str, ...] = ("running", "sold", "unsuccessful")
 
 
@@ -493,6 +495,13 @@ def _set_delete_job(job_id: str, patch: Dict[str, Any]) -> None:
         current = DELETE_JOBS.get(job_id, {})
         current.update(patch)
         DELETE_JOBS[job_id] = current
+
+
+def _set_split_job(job_id: str, patch: Dict[str, Any]) -> None:
+    with SPLIT_JOBS_LOCK:
+        current = SPLIT_JOBS.get(job_id, {})
+        current.update(patch)
+        SPLIT_JOBS[job_id] = current
 
 
 def _is_item_number_ambiguous_error(parsed: Dict[str, Any]) -> bool:
@@ -1580,6 +1589,97 @@ def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str,
         "uploaded": uploaded,
         "not_uploaded": not_uploaded,
     }
+
+
+def _run_items_uploaded_split_job(job_id: str, account: str | None) -> None:
+    _set_split_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+        },
+    )
+
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_split_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
+    try:
+        account_mode = _account_mode(account)
+        json_folder = get_json_folder_for_account(account_mode)
+        uploaded, not_uploaded, warnings = split_uploaded_items(
+            account=account_mode,
+            json_folder=json_folder,
+            progress_cb=progress_cb,
+        )
+        result = {
+            "account": account_mode,
+            "json_folder": json_folder,
+            "partial": bool(warnings),
+            "warnings": warnings,
+            "uploaded_count": len(uploaded),
+            "not_uploaded_count": len(not_uploaded),
+            "uploaded": uploaded,
+            "not_uploaded": not_uploaded,
+        }
+    except Exception as exc:
+        _set_split_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+                "progress": {"phase": "failed"},
+            },
+        )
+        return
+
+    _set_split_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+            "progress": {
+                "phase": "completed",
+                "uploaded": result.get("uploaded_count", 0),
+                "not_uploaded": result.get("not_uploaded_count", 0),
+                "warnings_count": len(result.get("warnings") or []),
+            },
+        },
+    )
+
+
+@router.post("/uploaded_split_async")
+def items_uploaded_split_async(
+    background_tasks: BackgroundTasks,
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    _account_mode(account)
+    job_id = uuid4().hex
+    _set_split_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "account": account,
+        },
+    )
+    background_tasks.add_task(_run_items_uploaded_split_job, job_id, account)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/uploaded_split_async/{job_id}",
+    }
+
+
+@router.get("/uploaded_split_async/{job_id}")
+def items_uploaded_split_async_status(job_id: str) -> Dict[str, Any]:
+    with SPLIT_JOBS_LOCK:
+        job = SPLIT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 @router.post("/validate")

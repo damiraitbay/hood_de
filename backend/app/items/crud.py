@@ -1,5 +1,7 @@
-from typing import Any, Dict, List, Set, Tuple
+import os
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, List, Set, Tuple
 
 from app.items.storage import load_all_items
 from app.logger import get_logger
@@ -16,92 +18,159 @@ def get_server_items(json_folder: str | None = None) -> List[Dict[str, Any]]:
     return load_all_items(json_folder=json_folder)
 
 
-def _load_hood_reference_ids(cfg: ApiConfig, group_size: int = 500) -> Tuple[Set[str], List[Dict[str, Any]]]:
+def _load_status_reference_ids(
+    cfg: ApiConfig,
+    item_status: str,
+    group_size: int = 500,
+) -> Tuple[Set[str], List[Dict[str, Any]], int]:
+    status_refs: Set[str] = set()
+    warnings: List[Dict[str, Any]] = []
+    pages = 0
+    start_at = 1
+
+    while True:
+        xml_body = build_item_list(
+            item_status=item_status,
+            start_at=start_at,
+            group_size=group_size,
+            start_date=None,
+            end_date=None,
+            config=cfg,
+        )
+        response_xml = ""
+        try:
+            response_xml = send_request(xml_body, config=cfg)
+            page = parse_item_list_response(response_xml)
+            pages += 1
+        except ET.ParseError as exc:
+            snippet = response_xml[:200].replace("\n", " ").strip()
+            warnings.append(
+                {
+                    "status": item_status,
+                    "start_at": start_at,
+                    "reason": f"non_xml_response: {exc}",
+                    "response_snippet": snippet,
+                }
+            )
+            logger.warning(
+                "uploaded_split: parse error for status=%s start_at=%s: %s; snippet=%s",
+                item_status,
+                start_at,
+                exc,
+                snippet,
+            )
+            break
+        except Exception as exc:
+            warnings.append(
+                {
+                    "status": item_status,
+                    "start_at": start_at,
+                    "reason": f"request_error: {exc}",
+                }
+            )
+            logger.warning(
+                "uploaded_split: request error for status=%s start_at=%s: %s",
+                item_status,
+                start_at,
+                exc,
+            )
+            break
+
+        errors = page.get("errors") or []
+        if errors:
+            warnings.append(
+                {
+                    "status": item_status,
+                    "start_at": start_at,
+                    "reason": "api_errors",
+                    "errors": [str(err) for err in errors],
+                }
+            )
+            logger.warning(
+                "uploaded_split: hood api errors for status=%s start_at=%s: %s",
+                item_status,
+                start_at,
+                "; ".join(str(err) for err in errors),
+            )
+            break
+
+        items = page.get("items") or []
+        for hood_item in items:
+            ref = str(hood_item.get("referenceID") or "").strip()
+            if ref:
+                status_refs.add(ref)
+
+        if not items:
+            break
+
+        total_records = int(page.get("total_records") or 0)
+        if total_records and start_at + len(items) > total_records:
+            break
+        effective_group_size = int(page.get("group_size") or 0)
+        step = effective_group_size if effective_group_size > 0 else len(items)
+        if len(items) < step:
+            break
+        start_at += step
+
+    return status_refs, warnings, pages
+
+
+def _load_hood_reference_ids(
+    cfg: ApiConfig,
+    group_size: int = 500,
+    workers: int = 3,
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
+) -> Tuple[Set[str], List[Dict[str, Any]]]:
+    statuses = list(_ITEM_STATUSES)
+    max_workers = max(1, min(int(workers), len(statuses), 8))
     reference_ids: Set[str] = set()
     warnings: List[Dict[str, Any]] = []
 
-    for item_status in _ITEM_STATUSES:
-        start_at = 1
-        while True:
-            xml_body = build_item_list(
-                item_status=item_status,
-                start_at=start_at,
-                group_size=group_size,
-                start_date=None,
-                end_date=None,
-                config=cfg,
-            )
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "loading_hood_items",
+                "statuses_total": len(statuses),
+                "statuses_done": 0,
+                "workers": max_workers,
+                "hood_reference_count": 0,
+            }
+        )
+
+    done_count = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_load_status_reference_ids, cfg, status_name, group_size): status_name
+            for status_name in statuses
+        }
+        for future in as_completed(futures):
+            status_name = futures[future]
+            status_refs: Set[str] = set()
+            status_warnings: List[Dict[str, Any]] = []
+            pages = 0
             try:
-                response_xml = send_request(xml_body, config=cfg)
-                page = parse_item_list_response(response_xml)
-            except ET.ParseError as exc:
-                snippet = (response_xml[:200] if "response_xml" in locals() else "").replace("\n", " ").strip()
-                warnings.append(
-                    {
-                        "status": item_status,
-                        "start_at": start_at,
-                        "reason": f"non_xml_response: {exc}",
-                        "response_snippet": snippet,
-                    }
-                )
-                logger.warning(
-                    "uploaded_split: parse error for status=%s start_at=%s: %s; snippet=%s",
-                    item_status,
-                    start_at,
-                    exc,
-                    snippet,
-                )
-                break
+                status_refs, status_warnings, pages = future.result()
             except Exception as exc:
-                warnings.append(
+                status_warnings = [{"status": status_name, "reason": f"worker_error: {exc}"}]
+
+            reference_ids.update(status_refs)
+            warnings.extend(status_warnings)
+            done_count += 1
+
+            if progress_cb is not None:
+                progress_cb(
                     {
-                        "status": item_status,
-                        "start_at": start_at,
-                        "reason": f"request_error: {exc}",
+                        "phase": "loading_hood_items",
+                        "statuses_total": len(statuses),
+                        "statuses_done": done_count,
+                        "current_status": status_name,
+                        "current_status_pages": pages,
+                        "current_status_references": len(status_refs),
+                        "warnings_count": len(warnings),
+                        "hood_reference_count": len(reference_ids),
+                        "workers": max_workers,
                     }
                 )
-                logger.warning(
-                    "uploaded_split: request error for status=%s start_at=%s: %s",
-                    item_status,
-                    start_at,
-                    exc,
-                )
-                break
-
-            errors = page.get("errors") or []
-            if errors:
-                warnings.append(
-                    {
-                        "status": item_status,
-                        "start_at": start_at,
-                        "reason": "api_errors",
-                        "errors": [str(err) for err in errors],
-                    }
-                )
-                logger.warning(
-                    "uploaded_split: hood api errors for status=%s start_at=%s: %s",
-                    item_status,
-                    start_at,
-                    "; ".join(str(err) for err in errors),
-                )
-                break
-
-            items = page.get("items") or []
-            for hood_item in items:
-                ref = str(hood_item.get("referenceID") or "").strip()
-                if ref:
-                    reference_ids.add(ref)
-
-            if not items:
-                break
-            total_records = int(page.get("total_records") or 0)
-            if total_records and start_at + len(items) > total_records:
-                break
-            effective_group_size = int(page.get("group_size") or 0)
-            step = effective_group_size if effective_group_size > 0 else len(items)
-            if len(items) < step:
-                break
-            start_at += step
 
     return reference_ids, warnings
 
@@ -109,23 +178,68 @@ def _load_hood_reference_ids(cfg: ApiConfig, group_size: int = 500) -> Tuple[Set
 def split_uploaded_items(
     account: str | None = None,
     json_folder: str | None = None,
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
     cfg = ApiConfig.from_env(account=account)
-    hood_reference_ids, warnings = _load_hood_reference_ids(cfg=cfg)
+    workers = max(1, min(int(os.environ.get("HOOD_UPLOADED_SPLIT_WORKERS", "3")), 8))
+    hood_reference_ids, warnings = _load_hood_reference_ids(
+        cfg=cfg,
+        workers=workers,
+        progress_cb=progress_cb,
+    )
+    local_items = load_all_items(json_folder=json_folder)
     uploaded: List[str] = []
     not_uploaded: List[Dict[str, Any]] = []
 
-    for item in load_all_items(json_folder=json_folder):
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "splitting_local_items",
+                "total_items": len(local_items),
+                "processed_items": 0,
+                "uploaded": 0,
+                "not_uploaded": 0,
+                "warnings_count": len(warnings),
+                "hood_reference_count": len(hood_reference_ids),
+            }
+        )
+
+    for idx, item in enumerate(local_items, start=1):
         raw_id = str(item.get("ID") or item.get("id") or "").strip()
         if not raw_id:
             not_uploaded.append(item)
-            continue
-
-        ref = f"ART{raw_id}"
-        if ref in hood_reference_ids:
-            uploaded.append(ref)
         else:
-            not_uploaded.append(item)
+            ref = f"ART{raw_id}"
+            if ref in hood_reference_ids:
+                uploaded.append(ref)
+            else:
+                not_uploaded.append(item)
+
+        if progress_cb is not None and (idx % 200 == 0 or idx == len(local_items)):
+            progress_cb(
+                {
+                    "phase": "splitting_local_items",
+                    "total_items": len(local_items),
+                    "processed_items": idx,
+                    "uploaded": len(uploaded),
+                    "not_uploaded": len(not_uploaded),
+                    "warnings_count": len(warnings),
+                    "hood_reference_count": len(hood_reference_ids),
+                }
+            )
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "total_items": len(local_items),
+                "processed_items": len(local_items),
+                "uploaded": len(uploaded),
+                "not_uploaded": len(not_uploaded),
+                "warnings_count": len(warnings),
+                "hood_reference_count": len(hood_reference_ids),
+            }
+        )
 
     return uploaded, not_uploaded, warnings
 

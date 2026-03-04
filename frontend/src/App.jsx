@@ -260,6 +260,77 @@ export default function App() {
     }
   }
 
+  async function pollUploadedSplitJob(jobId) {
+    const url = withAccount(`${endpoints.uploadedSplitAsync}/${encodeURIComponent(jobId)}`);
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`GET ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", "Uploaded split", `Status check failed: HTTP ${res.status}`);
+        stopUpdatePolling();
+        return;
+      }
+
+      const statusValue = String(data?.status || "");
+      const progress = data?.progress || {};
+      const phase = String(progress?.phase || "");
+      const statusesDone = Number(progress?.statuses_done || 0);
+      const statusesTotal = Number(progress?.statuses_total || 0);
+      const processedItems = Number(progress?.processed_items || 0);
+      const totalItems = Number(progress?.total_items || 0);
+      const uploaded = Number(progress?.uploaded || data?.result?.uploaded_count || 0);
+      const notUploaded = Number(progress?.not_uploaded || data?.result?.not_uploaded_count || 0);
+
+      if (statusValue === "queued") {
+        setUiStatus("loading", "Uploaded split", `Queued. Job: ${jobId}`);
+        return;
+      }
+      if (statusValue === "running") {
+        if (phase === "loading_hood_items") {
+          setUiStatus(
+            "loading",
+            "Uploaded split",
+            `Loading Hood items: statuses ${statusesDone}/${statusesTotal}`
+          );
+          return;
+        }
+        if (phase === "splitting_local_items") {
+          setUiStatus(
+            "loading",
+            "Uploaded split",
+            `Splitting local items: ${processedItems}/${totalItems}, uploaded ${uploaded}, not uploaded ${notUploaded}`
+          );
+          return;
+        }
+        setUiStatus("loading", "Uploaded split", `Running...${phase ? ` (${phase})` : ""}`);
+        return;
+      }
+      if (statusValue === "completed") {
+        const partial = Boolean(data?.result?.partial);
+        const warningsCount = Array.isArray(data?.result?.warnings) ? data.result.warnings.length : 0;
+        setUiStatus(
+          "success",
+          "Uploaded split",
+          `Completed: uploaded ${uploaded}, not uploaded ${notUploaded}${partial ? `, partial with warnings ${warningsCount}` : ""}`
+        );
+        stopUpdatePolling();
+        return;
+      }
+      if (statusValue === "failed") {
+        setUiStatus("error", "Uploaded split", `Failed: ${data?.error || "unknown error"}`);
+        stopUpdatePolling();
+      }
+    } catch (e) {
+      setUiStatus("error", "Uploaded split", String(e));
+      stopUpdatePolling();
+    }
+  }
+
   async function startDeleteAsync(url, label) {
     setLoading(true);
     setRawOutput("");
@@ -620,16 +691,43 @@ export default function App() {
   }
 
   async function loadUploadedSplit() {
-    const result = await call("GET", withAccount(endpoints.uploadedSplit), "Uploaded/not uploaded list");
-    if (!result.ok) return;
+    const url = withAccount(endpoints.uploadedSplitAsync);
+    setLoading(true);
+    setRawOutput("");
+    setUiStatus("loading", "Uploaded split", "Starting async split...");
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`POST ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
 
-    const uploadedCount = Number(result.data?.uploaded_count || 0);
-    const notUploadedCount = Number(result.data?.not_uploaded_count || 0);
-    setUiStatus(
-      "success",
-      "Uploaded split",
-      `Uploaded: ${uploadedCount}, not uploaded: ${notUploadedCount}`
-    );
+      if (!res.ok) {
+        setUiStatus("error", "Uploaded split", `HTTP ${res.status}. Open technical details below.`);
+        return;
+      }
+
+      const jobId = String(data?.job_id || "").trim();
+      if (!jobId) {
+        setUiStatus("error", "Uploaded split", "job_id is missing in response.");
+        return;
+      }
+      setActiveUpdateJobId(jobId);
+      stopUpdatePolling();
+      setUiStatus("loading", "Uploaded split", `Queued. Job: ${jobId}`);
+      await pollUploadedSplitJob(jobId);
+      updatePollTimerRef.current = setInterval(() => {
+        pollUploadedSplitJob(jobId);
+      }, 2000);
+    } catch (e) {
+      setUiStatus("error", "Uploaded split", String(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function deleteByItemNumber() {

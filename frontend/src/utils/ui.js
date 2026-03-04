@@ -55,6 +55,7 @@ export function buildEndpoints(apiBase) {
     deleteAsyncStatus: `${base}/items/delete_async`,
     status: `${base}/items/status`,
     uploadedSplit: `${base}/items/uploaded_split`,
+    uploadedSplitAsync: `${base}/items/uploaded_split_async`,
     json: `${base}/items/json`,
     jsonFiles: `${base}/items/json/files`,
     validateOne: `${base}/items/validate_one/`,
