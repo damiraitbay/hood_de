@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Set, Tuple
 
 from app.items.storage import load_all_items
+from app.items.utils import normalize_item
 from app.logger import get_logger
 from hood_api.api.parsers import parse_item_list_response
 from hood_api.builders import build_item_list
@@ -18,12 +19,22 @@ def get_server_items(json_folder: str | None = None) -> List[Dict[str, Any]]:
     return load_all_items(json_folder=json_folder)
 
 
+def _normalize_item_number(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    compact = "".join(raw.split())
+    if compact.endswith(".0") and compact[:-2].isdigit():
+        return compact[:-2]
+    return compact
+
+
 def _load_status_reference_ids(
     cfg: ApiConfig,
     item_status: str,
     group_size: int = 500,
 ) -> Tuple[Set[str], List[Dict[str, Any]], int]:
-    status_refs: Set[str] = set()
+    status_item_numbers: Set[str] = set()
     warnings: List[Dict[str, Any]] = []
     pages = 0
     start_at = 1
@@ -96,9 +107,9 @@ def _load_status_reference_ids(
 
         items = page.get("items") or []
         for hood_item in items:
-            ref = str(hood_item.get("referenceID") or "").strip()
-            if ref:
-                status_refs.add(ref)
+            item_number = _normalize_item_number(hood_item.get("itemNumber"))
+            if item_number:
+                status_item_numbers.add(item_number)
 
         if not items:
             break
@@ -112,7 +123,7 @@ def _load_status_reference_ids(
             break
         start_at += step
 
-    return status_refs, warnings, pages
+    return status_item_numbers, warnings, pages
 
 
 def _load_hood_reference_ids(
@@ -123,7 +134,7 @@ def _load_hood_reference_ids(
 ) -> Tuple[Set[str], List[Dict[str, Any]]]:
     statuses = list(_ITEM_STATUSES)
     max_workers = max(1, min(int(workers), len(statuses), 8))
-    reference_ids: Set[str] = set()
+    hood_item_numbers: Set[str] = set()
     warnings: List[Dict[str, Any]] = []
 
     if progress_cb is not None:
@@ -133,7 +144,7 @@ def _load_hood_reference_ids(
                 "statuses_total": len(statuses),
                 "statuses_done": 0,
                 "workers": max_workers,
-                "hood_reference_count": 0,
+                "hood_item_number_count": 0,
             }
         )
 
@@ -145,15 +156,15 @@ def _load_hood_reference_ids(
         }
         for future in as_completed(futures):
             status_name = futures[future]
-            status_refs: Set[str] = set()
+            status_item_numbers: Set[str] = set()
             status_warnings: List[Dict[str, Any]] = []
             pages = 0
             try:
-                status_refs, status_warnings, pages = future.result()
+                status_item_numbers, status_warnings, pages = future.result()
             except Exception as exc:
                 status_warnings = [{"status": status_name, "reason": f"worker_error: {exc}"}]
 
-            reference_ids.update(status_refs)
+            hood_item_numbers.update(status_item_numbers)
             warnings.extend(status_warnings)
             done_count += 1
 
@@ -165,14 +176,14 @@ def _load_hood_reference_ids(
                         "statuses_done": done_count,
                         "current_status": status_name,
                         "current_status_pages": pages,
-                        "current_status_references": len(status_refs),
+                        "current_status_item_numbers": len(status_item_numbers),
                         "warnings_count": len(warnings),
-                        "hood_reference_count": len(reference_ids),
+                        "hood_item_number_count": len(hood_item_numbers),
                         "workers": max_workers,
                     }
                 )
 
-    return reference_ids, warnings
+    return hood_item_numbers, warnings
 
 
 def split_uploaded_items(
@@ -182,7 +193,7 @@ def split_uploaded_items(
 ) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
     cfg = ApiConfig.from_env(account=account)
     workers = max(1, min(int(os.environ.get("HOOD_UPLOADED_SPLIT_WORKERS", "3")), 8))
-    hood_reference_ids, warnings = _load_hood_reference_ids(
+    hood_item_numbers, warnings = _load_hood_reference_ids(
         cfg=cfg,
         workers=workers,
         progress_cb=progress_cb,
@@ -200,18 +211,18 @@ def split_uploaded_items(
                 "uploaded": 0,
                 "not_uploaded": 0,
                 "warnings_count": len(warnings),
-                "hood_reference_count": len(hood_reference_ids),
+                "hood_item_number_count": len(hood_item_numbers),
             }
         )
 
     for idx, item in enumerate(local_items, start=1):
-        raw_id = str(item.get("ID") or item.get("id") or "").strip()
-        if not raw_id:
+        norm = normalize_item(item)
+        item_number = _normalize_item_number(norm.get("item_number") or norm.get("ean"))
+        if not item_number:
             not_uploaded.append(item)
         else:
-            ref = f"ART{raw_id}"
-            if ref in hood_reference_ids:
-                uploaded.append(ref)
+            if item_number in hood_item_numbers:
+                uploaded.append(item_number)
             else:
                 not_uploaded.append(item)
 
@@ -224,7 +235,7 @@ def split_uploaded_items(
                     "uploaded": len(uploaded),
                     "not_uploaded": len(not_uploaded),
                     "warnings_count": len(warnings),
-                    "hood_reference_count": len(hood_reference_ids),
+                    "hood_item_number_count": len(hood_item_numbers),
                 }
             )
 
@@ -237,7 +248,7 @@ def split_uploaded_items(
                 "uploaded": len(uploaded),
                 "not_uploaded": len(not_uploaded),
                 "warnings_count": len(warnings),
-                "hood_reference_count": len(hood_reference_ids),
+                "hood_item_number_count": len(hood_item_numbers),
             }
         )
 

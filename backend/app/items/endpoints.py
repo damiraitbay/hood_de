@@ -1569,7 +1569,7 @@ def items_status() -> Dict[str, Any]:
 @router.get("/uploaded_split")
 def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str, Any]:
     """
-    Разделяет локальные товары на загруженные в Hood и не загруженные.
+    Разделяет локальные товары на загруженные в Hood и не загруженные по itemNumber.
     """
     account_mode = _account_mode(account)
     json_folder = get_json_folder_for_account(account_mode)
@@ -1582,6 +1582,7 @@ def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str,
     return {
         "account": account_mode,
         "json_folder": json_folder,
+        "match_by": "item_number",
         "partial": bool(warnings),
         "warnings": warnings,
         "uploaded_count": len(uploaded),
@@ -1614,6 +1615,7 @@ def _run_items_uploaded_split_job(job_id: str, account: str | None) -> None:
         result = {
             "account": account_mode,
             "json_folder": json_folder,
+            "match_by": "item_number",
             "partial": bool(warnings),
             "warnings": warnings,
             "uploaded_count": len(uploaded),
