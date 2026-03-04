@@ -1,49 +1,78 @@
-import asyncio
-from typing import List
+from typing import Any, Dict, List, Set, Tuple
+
 from app.items.storage import load_all_items
-from app.items.utils import normalize_item
+from hood_api.api.parsers import parse_item_list_response
+from hood_api.builders import build_item_list
+from hood_api.client import send_request
+from hood_api.config import ApiConfig
 
-from app.hood_service.items import(
-    hood_item_exists, 
-    hood_upload_item
+_ITEM_STATUSES: Tuple[str, ...] = ("running", "sold", "unsuccessful")
 
-)
 
-from app.logger import get_logger
+def get_server_items(json_folder: str | None = None) -> List[Dict[str, Any]]:
+    return load_all_items(json_folder=json_folder)
 
-logger = get_logger("items")
 
-def get_server_items():
-    return load_all_items()
+def _load_hood_reference_ids(cfg: ApiConfig, group_size: int = 500) -> Set[str]:
+    reference_ids: Set[str] = set()
 
-def split_uploaded_items():
-    uploaded, not_uploaded = [], []
+    for item_status in _ITEM_STATUSES:
+        start_at = 1
+        while True:
+            xml_body = build_item_list(
+                item_status=item_status,
+                start_at=start_at,
+                group_size=group_size,
+                start_date=None,
+                end_date=None,
+                config=cfg,
+            )
+            response_xml = send_request(xml_body, config=cfg)
+            page = parse_item_list_response(response_xml)
+            errors = page.get("errors") or []
+            if errors:
+                raise RuntimeError("; ".join(str(err) for err in errors))
 
-    for item in load_all_items():
-        ref = f"ART{item.get('ID')}"
-        if hood_item_exists(ref):
+            items = page.get("items") or []
+            for hood_item in items:
+                ref = str(hood_item.get("referenceID") or "").strip()
+                if ref:
+                    reference_ids.add(ref)
+
+            if not items:
+                break
+            total_records = int(page.get("total_records") or 0)
+            if total_records and start_at + len(items) > total_records:
+                break
+            effective_group_size = int(page.get("group_size") or 0)
+            step = effective_group_size if effective_group_size > 0 else len(items)
+            if len(items) < step:
+                break
+            start_at += step
+
+    return reference_ids
+
+
+def split_uploaded_items(
+    account: str | None = None,
+    json_folder: str | None = None,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    cfg = ApiConfig.from_env(account=account)
+    hood_reference_ids = _load_hood_reference_ids(cfg=cfg)
+    uploaded: List[str] = []
+    not_uploaded: List[Dict[str, Any]] = []
+
+    for item in load_all_items(json_folder=json_folder):
+        raw_id = str(item.get("ID") or item.get("id") or "").strip()
+        if not raw_id:
+            not_uploaded.append(item)
+            continue
+
+        ref = f"ART{raw_id}"
+        if ref in hood_reference_ids:
             uploaded.append(ref)
         else:
             not_uploaded.append(item)
 
     return uploaded, not_uploaded
-
-async def upload_items_async(items: List[dict]):
-    semaphore = asyncio.Semaphore(5)
-    results = []
-
-    async def worker(item):
-        async with semaphore:
-            ref = f"ART{item.get('ID')}"
-            try:
-                normalized = normalize_item(item)
-                resp = await asyncio.to_thread(hood_upload_item, normalized)
-                logger.info(f"{ref} uploaded")
-                return {"reference_id": ref, "status": "ok"}
-            except Exception as e:
-                logger.error(f"{ref} failed: {e}")
-                return {"reference_id": ref, "status": "error", "error": str(e)}
-
-    tasks = [worker(item) for item in items]
-    return await asyncio.gather(*tasks)
 

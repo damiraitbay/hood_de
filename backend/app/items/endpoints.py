@@ -46,6 +46,7 @@ from app.items.storage import (
     load_all_items,
     load_items_from_source_file,
 )
+from app.items.crud import split_uploaded_items
 from app.items.utils import normalize_item
 
 router = APIRouter()
@@ -1554,6 +1555,29 @@ def items_status() -> Dict[str, Any]:
     if not isinstance(data, list):
         data = []
     return {"failed_items": data}
+
+
+@router.get("/uploaded_split")
+def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str, Any]:
+    """
+    Разделяет локальные товары на загруженные в Hood и не загруженные.
+    """
+    account_mode = _account_mode(account)
+    json_folder = get_json_folder_for_account(account_mode)
+
+    try:
+        uploaded, not_uploaded = split_uploaded_items(account=account_mode, json_folder=json_folder)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return {
+        "account": account_mode,
+        "json_folder": json_folder,
+        "uploaded_count": len(uploaded),
+        "not_uploaded_count": len(not_uploaded),
+        "uploaded": uploaded,
+        "not_uploaded": not_uploaded,
+    }
 
 
 @router.post("/validate")

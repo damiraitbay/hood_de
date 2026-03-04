@@ -619,6 +619,19 @@ export default function App() {
     await call("GET", withAccount(endpoints.status), "Failed items list");
   }
 
+  async function loadUploadedSplit() {
+    const result = await call("GET", withAccount(endpoints.uploadedSplit), "Uploaded/not uploaded list");
+    if (!result.ok) return;
+
+    const uploadedCount = Number(result.data?.uploaded_count || 0);
+    const notUploadedCount = Number(result.data?.not_uploaded_count || 0);
+    setUiStatus(
+      "success",
+      "Uploaded split",
+      `Uploaded: ${uploadedCount}, not uploaded: ${notUploadedCount}`
+    );
+  }
+
   async function deleteByItemNumber() {
     const itemNumbers = deleteItemNumbers
       .split(/\r?\n/)
@@ -929,6 +942,9 @@ export default function App() {
               </button>
               <button className="btn" disabled={loading} onClick={loadFailedItems}>
                 Show failed items
+              </button>
+              <button className="btn" disabled={loading} onClick={loadUploadedSplit}>
+                Show uploaded/not uploaded
               </button>
             </div>
           </section>
