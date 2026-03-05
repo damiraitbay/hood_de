@@ -1,14 +1,15 @@
 import json
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Set, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from app.config import settings
 from app.items.storage import load_all_items
 from app.items.utils import normalize_item
 from app.logger import get_logger
 from hood_api.api.parsers import parse_item_detail_response
-from hood_api.builders import build_item_detail
+from hood_api.builders import build_item_detail_by_item_number
 from hood_api.client import send_request
 from hood_api.config import ApiConfig
 
@@ -31,7 +32,7 @@ def _normalize_item_number(value: Any) -> str:
 
 
 def _exists_in_hood_by_item_detail(item_number: str, cfg: ApiConfig) -> Tuple[bool, str | None]:
-    xml_body = build_item_detail(item_id=item_number, config=cfg)
+    xml_body = build_item_detail_by_item_number(item_number=item_number, config=cfg)
     try:
         response_xml = send_request(xml_body, config=cfg)
     except Exception as exc:
@@ -74,7 +75,18 @@ def split_uploaded_items(
     uploaded: List[str] = []
     not_uploaded: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
-    uploaded_set: Set[str] = set()
+
+    def _factory_from_raw(raw_item: Dict[str, Any]) -> str:
+        return str(raw_item.get("__source_name__") or "").strip()
+
+    def _raw_with_factory(raw_item: Dict[str, Any], item_number: str | None = None) -> Dict[str, Any]:
+        item = dict(raw_item)
+        factory = _factory_from_raw(raw_item)
+        if factory:
+            item["factory"] = factory
+        if item_number:
+            item["checked_item_number"] = item_number
+        return item
 
     if progress_cb is not None:
         progress_cb(
@@ -93,15 +105,16 @@ def split_uploaded_items(
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for raw in local_items:
             norm = normalize_item(raw)
-            item_number = _normalize_item_number(norm.get("ean") or norm.get("item_number"))
+            item_number = _normalize_item_number(norm.get("item_number") or norm.get("ean"))
             if not item_number:
                 warnings.append(
                     {
                         "reason": "missing_item_number",
                         "local_id": str(raw.get("ID") or raw.get("id") or "").strip() or None,
+                        "factory": _factory_from_raw(raw) or None,
                     }
                 )
-                not_uploaded.append(raw)
+                not_uploaded.append(_raw_with_factory(raw))
                 continue
             future = executor.submit(_exists_in_hood_by_item_detail, item_number, cfg)
             futures_map[future] = {"item_number": item_number, "raw": raw}
@@ -121,15 +134,14 @@ def split_uploaded_items(
                     {
                         "item_number": item_number,
                         "reason": err,
+                        "factory": _factory_from_raw(raw) or None,
                     }
                 )
 
             if exists:
-                if item_number not in uploaded_set:
-                    uploaded.append(item_number)
-                    uploaded_set.add(item_number)
+                uploaded.append(item_number)
             else:
-                not_uploaded.append(raw)
+                not_uploaded.append(_raw_with_factory(raw, item_number=item_number))
 
             processed += 1
             if progress_cb is not None and (processed % 100 == 0 or processed == len(futures_map)):

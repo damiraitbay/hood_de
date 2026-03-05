@@ -448,6 +448,19 @@ def build_item_detail(item_id: str, config: ApiConfig | None = None) -> str:
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + out
 
 
+def build_item_detail_by_item_number(item_number: str, config: ApiConfig | None = None) -> str:
+    """itemDetail by itemNumber in root body (used by account-specific Hood setups)."""
+    config = config or ApiConfig.from_env()
+    ph = _password_hash(config.password)
+    api = ET.Element("api", type="public", version="2.0.1", user=config.user, password=ph)
+    ET.SubElement(api, "function").text = "itemDetail"
+    ET.SubElement(api, "accountName").text = config.user
+    ET.SubElement(api, "accountPass").text = ph
+    ET.SubElement(api, "itemNumber").text = str(item_number).strip()
+    out = ET.tostring(api, encoding="unicode", method="xml", default_namespace="")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + out
+
+
 def build_item_list(item_status: str, start_at: int, group_size: int,
                     start_date: Optional[str] = None, end_date: Optional[str] = None,
                     config: ApiConfig = None) -> str:
