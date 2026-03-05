@@ -2232,6 +2232,187 @@ def _run_delete_source_file_job(job_id: str, source_file: str, account: str | No
     )
 
 
+def _run_delete_by_source_files(
+    source_files: List[str],
+    account: str | None = Query(default=None),
+    batch_size: int = Query(default=200, ge=1, le=500),
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
+) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    normalized_files: List[str] = []
+    seen: set[str] = set()
+    for raw in source_files:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        normalized_files.append(name)
+        seen.add(name)
+    if not normalized_files:
+        raise HTTPException(status_code=400, detail="source_files is empty")
+
+    files_total = len(normalized_files)
+    files_completed = 0
+    total_requested = 0
+    total_deleted = 0
+    total_failed = 0
+    failed_files = 0
+    details: List[Dict[str, Any]] = []
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "prepared",
+                "files_total": files_total,
+                "files_completed": 0,
+                "requested": 0,
+                "deleted": 0,
+                "failed": 0,
+                "failed_files": 0,
+            }
+        )
+
+    workers = max(1, min(int(os.environ.get("HOOD_DELETE_SOURCE_FILES_WORKERS", "4")), 16))
+    worker_count = min(workers, max(files_total, 1))
+
+    def _delete_file(source_file: str) -> Dict[str, Any]:
+        try:
+            result = _run_delete_by_source_file(
+                source_file=source_file,
+                account=account_mode,
+                batch_size=batch_size,
+            )
+            return {"source_file": source_file, "result": result, "error": None}
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
+            return {"source_file": source_file, "result": None, "error": detail}
+        except Exception as exc:
+            return {"source_file": source_file, "result": None, "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(_delete_file, source_file) for source_file in normalized_files]
+        for future in as_completed(futures):
+            payload = future.result()
+            files_completed += 1
+
+            file_error = payload.get("error")
+            file_result = payload.get("result")
+            source_file = str(payload.get("source_file") or "")
+            if file_error:
+                failed_files += 1
+                details.append(
+                    {
+                        "source_file": source_file,
+                        "success": False,
+                        "error": file_error,
+                    }
+                )
+            else:
+                file_requested = int(file_result.get("requested") or 0)
+                file_deleted = int(file_result.get("deleted") or 0)
+                file_failed = int(file_result.get("failed") or 0)
+                total_requested += file_requested
+                total_deleted += file_deleted
+                total_failed += file_failed
+                details.append(file_result)
+                if file_failed > 0:
+                    failed_files += 1
+
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "phase": "deleting_files",
+                        "files_total": files_total,
+                        "files_completed": files_completed,
+                        "requested": total_requested,
+                        "deleted": total_deleted,
+                        "failed": total_failed,
+                        "failed_files": failed_files,
+                    }
+                )
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "files_total": files_total,
+                "files_completed": files_completed,
+                "requested": total_requested,
+                "deleted": total_deleted,
+                "failed": total_failed,
+                "failed_files": failed_files,
+            }
+        )
+
+    return {
+        "success": total_failed == 0 and failed_files == 0,
+        "account": account_mode,
+        "mode": "many_files",
+        "files_total": files_total,
+        "files_completed": files_completed,
+        "requested": total_requested,
+        "deleted": total_deleted,
+        "failed": total_failed,
+        "failed_files": failed_files,
+        "details": details,
+    }
+
+
+def _run_delete_source_files_job(
+    job_id: str,
+    source_files: List[str],
+    account: str | None,
+    batch_size: int,
+) -> None:
+    _set_delete_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+            "progress": {"phase": "running"},
+        },
+    )
+
+    def progress_cb(progress: Dict[str, Any]) -> None:
+        _set_delete_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
+
+    try:
+        result = _run_delete_by_source_files(
+            source_files=source_files,
+            account=account,
+            batch_size=batch_size,
+            progress_cb=progress_cb,
+        )
+    except Exception as exc:
+        _set_delete_job(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": _utc_now_iso(),
+                "error": str(exc),
+                "progress": {"phase": "failed"},
+            },
+        )
+        return
+
+    _set_delete_job(
+        job_id,
+        {
+            "status": "completed",
+            "finished_at": _utc_now_iso(),
+            "result": result,
+            "progress": {
+                "phase": "completed",
+                "files_total": result.get("files_total", 0),
+                "files_completed": result.get("files_completed", 0),
+                "requested": result.get("requested", 0),
+                "deleted": result.get("deleted", 0),
+                "failed": result.get("failed", 0),
+                "failed_files": result.get("failed_files", 0),
+            },
+        },
+    )
+
+
 def _run_delete_all_job(job_id: str, account: str | None, item_status: str, delete_batch_size: int) -> None:
     _set_delete_job(
         job_id,
@@ -2301,6 +2482,47 @@ def delete_items_by_source_file_async(
         },
     )
     background_tasks.add_task(_run_delete_source_file_job, job_id, source_file, account, batch_size)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/delete_async/{job_id}",
+    }
+
+
+@router.post("/delete/by-source-files_async")
+def delete_items_by_source_files_async(
+    background_tasks: BackgroundTasks,
+    source_files: List[str] = Body(..., embed=True),
+    account: str | None = Query(default=None),
+    batch_size: int = Query(default=200, ge=1, le=500),
+) -> Dict[str, Any]:
+    _account_mode(account)
+    normalized_files: List[str] = []
+    seen: set[str] = set()
+    for raw in source_files:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        normalized_files.append(name)
+        seen.add(name)
+    if not normalized_files:
+        raise HTTPException(status_code=400, detail="source_files is empty")
+
+    job_id = uuid4().hex
+    _set_delete_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "type": "delete_by_source_files",
+            "mode": "many_files",
+            "source_files": normalized_files,
+            "account": account,
+            "batch_size": batch_size,
+        },
+    )
+    background_tasks.add_task(_run_delete_source_files_job, job_id, normalized_files, account, batch_size)
     return {
         "job_id": job_id,
         "status": "queued",

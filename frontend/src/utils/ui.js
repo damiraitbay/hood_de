@@ -64,6 +64,7 @@ export function buildEndpoints(apiBase) {
     deleteByItemNumberBulk: `${base}/items/delete/by-item-number`,
     deleteBySourceFile: `${base}/items/delete/by-source-file`,
     deleteBySourceFileAsync: `${base}/items/delete/by-source-file_async`,
+    deleteBySourceFilesAsync: `${base}/items/delete/by-source-files_async`,
     deleteAll: `${base}/items/delete/all`,
     deleteAllAsync: `${base}/items/delete/all_async`,
   };

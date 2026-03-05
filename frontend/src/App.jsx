@@ -220,6 +220,9 @@ export default function App() {
       const requested = requestedRaw == null ? null : Number(requestedRaw);
       const deleted = deletedRaw == null ? null : Number(deletedRaw);
       const failed = failedRaw == null ? null : Number(failedRaw);
+      const filesTotal = Number(progress?.files_total ?? data?.result?.files_total ?? 0);
+      const filesCompleted = Number(progress?.files_completed ?? data?.result?.files_completed ?? 0);
+      const failedFiles = Number(progress?.failed_files ?? data?.result?.failed_files ?? 0);
       const phase = String(progress?.phase || "");
       pushProcessLog("delete_async", `status=${statusValue || "-"} phase=${phase || "-"}`);
 
@@ -247,6 +250,14 @@ export default function App() {
           setUiStatus("loading", "Async delete", `Loading items: ${suffix}`);
           return;
         }
+        if (phase === "deleting_files") {
+          setUiStatus(
+            "loading",
+            "Async delete",
+            `Running: files ${filesCompleted}/${filesTotal}, requested ${requested ?? "-"}, deleted ${deleted ?? "-"}, failed ${failed ?? "-"}, failed files ${failedFiles}`
+          );
+          return;
+        }
         const metrics =
           requested == null && deleted == null && failed == null
             ? "Running: processing..."
@@ -258,7 +269,9 @@ export default function App() {
         setUiStatus(
           "success",
           "Async delete",
-          `Completed: deleted ${deleted ?? 0}, failed ${failed ?? 0}, requested ${requested ?? 0}`
+          filesTotal > 0
+            ? `Completed: files ${filesCompleted}/${filesTotal}, deleted ${deleted ?? 0}, failed ${failed ?? 0}, failed files ${failedFiles}, requested ${requested ?? 0}`
+            : `Completed: deleted ${deleted ?? 0}, failed ${failed ?? 0}, requested ${requested ?? 0}`
         );
         stopUpdatePolling();
         return;
@@ -345,7 +358,7 @@ export default function App() {
     }
   }
 
-  async function startDeleteAsync(url, label) {
+  async function startDeleteAsync(url, label, payload = null) {
     setLoading(true);
     setRawOutput("");
     setProcessLogs([]);
@@ -355,6 +368,7 @@ export default function App() {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: payload ? JSON.stringify(payload) : null,
       });
       const text = await res.text();
       const data = parseResponseBody(text);
@@ -794,6 +808,19 @@ export default function App() {
     await startDeleteAsync(withSource(endpoints.deleteBySourceFileAsync), `Async delete from file (${sourceFile})`);
   }
 
+  async function deleteAllFromSelectedFiles() {
+    if (!sourceFilesMulti.length) {
+      setUiStatus("error", "Delete from selected files", "Select one or more source files first.");
+      return;
+    }
+    if (!window.confirm(`Delete all items in Hood from ${sourceFilesMulti.length} selected file(s)?`)) return;
+    await startDeleteAsync(
+      withAccount(endpoints.deleteBySourceFilesAsync),
+      `Async delete from selected files (${sourceFilesMulti.length})`,
+      { source_files: sourceFilesMulti }
+    );
+  }
+
   useEffect(() => () => stopUpdatePolling(), []);
 
   const statusClass = `status status-${status.type}`;
@@ -1101,6 +1128,9 @@ export default function App() {
               <button className="btn danger" disabled={loading || !sourceFile} onClick={deleteAllFromSelectedFile}>
                 Delete all from selected file
               </button>
+              <button className="btn danger" disabled={loading || !sourceFilesMulti.length} onClick={deleteAllFromSelectedFiles}>
+                Delete all from selected files ({sourceFilesMulti.length})
+              </button>
               <button className="btn danger" disabled={loading} onClick={deleteAllInHood}>
                 Delete ALL in Hood
               </button>
@@ -1113,7 +1143,6 @@ export default function App() {
             {activeUpdateJobId ? <div className="hint">Active async job: <code>{activeUpdateJobId}</code></div> : null}
             <details className="advanced">
               <summary>Technical details</summary>
-              <pre className="output">{processLogs.length ? processLogs.join("\n") : "-"}</pre>
               <pre className="output">{rawOutput || "-"}</pre>
             </details>
             <div className="hint">
