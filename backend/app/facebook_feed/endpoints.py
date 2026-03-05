@@ -1,9 +1,11 @@
 import csv
 import io
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
+import requests
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
@@ -47,6 +49,17 @@ FACEBOOK_HEADERS = [
 CURRENCY_MAP = {
     "7": "EUR",
 }
+
+COUNTRY_PROFILES: Dict[str, Dict[str, str]] = {
+    "de": {"domain": "https://www.jvmoebel.de", "currency": "EUR", "lang": "de", "shipping_country": "DE"},
+    "at": {"domain": "https://www.jvmoebel.at", "currency": "EUR", "lang": "de", "shipping_country": "AT"},
+    "ch": {"domain": "https://www.jvmoebel.ch", "currency": "CHF", "lang": "de", "shipping_country": "CH"},
+    "uk": {"domain": "https://www.jvfurniture.co.uk", "currency": "GBP", "lang": "en", "shipping_country": "GB"},
+}
+
+_FX_CACHE: Dict[Tuple[str, str], Tuple[float, float]] = {}
+_TR_CACHE: Dict[Tuple[str, str, str], str] = {}
+_FX_TTL_SECONDS = 60 * 30
 
 
 def _account_mode(account: str | None) -> str | None:
@@ -188,8 +201,8 @@ def _resolve_currency(raw_currency: Any) -> str:
     return CURRENCY_MAP.get(currency, settings.FACEBOOK_DEFAULT_CURRENCY)
 
 
-def _build_product_link(title: str, fallback_id: str = "") -> str:
-    base = (settings.FACEBOOK_PRODUCT_LINK_BASE or "").strip()
+def _build_product_link(title: str, fallback_id: str = "", base: str = "") -> str:
+    base = (base or settings.FACEBOOK_PRODUCT_LINK_BASE or "").strip()
     if not base:
         return ""
 
@@ -202,6 +215,102 @@ def _build_product_link(title: str, fallback_id: str = "") -> str:
     if not slug:
         return base.rstrip("/")
     return f"{base.rstrip('/')}/{slug}.htm"
+
+
+def _resolve_country(country: str | None) -> str:
+    raw = str(country or "de").strip().lower()
+    aliases = {"de": "de", "germany": "de", "deu": "de", "at": "at", "austria": "at", "ch": "ch", "switzerland": "ch", "uk": "uk", "gb": "uk", "unitedkingdom": "uk", "united_kingdom": "uk"}
+    key = aliases.get(raw, "")
+    if key and key in COUNTRY_PROFILES:
+        return key
+    raise HTTPException(status_code=400, detail="country must be one of: de, at, ch, uk")
+
+
+def _get_exchange_rate(from_currency: str, to_currency: str) -> float:
+    src = str(from_currency or "").strip().upper()
+    dst = str(to_currency or "").strip().upper()
+    if not src or not dst:
+        return 1.0
+    if src == dst:
+        return 1.0
+
+    now = time.time()
+    key = (src, dst)
+    cached = _FX_CACHE.get(key)
+    if cached and now - cached[1] < _FX_TTL_SECONDS:
+        return cached[0]
+
+    # Free public FX API (no key required).
+    url = f"https://api.frankfurter.app/latest?from={src}&to={dst}"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+        rate = float((payload.get("rates") or {}).get(dst) or 0)
+        if rate <= 0:
+            raise ValueError("invalid exchange rate")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Cannot fetch exchange rate {src}->{dst}: {exc}")
+
+    _FX_CACHE[key] = (rate, now)
+    return rate
+
+
+def _translate_text(value: str, source_lang: str, target_lang: str) -> str:
+    text = _compact_text(value)
+    if not text:
+        return ""
+    src = str(source_lang or "").strip().lower() or "auto"
+    dst = str(target_lang or "").strip().lower() or "en"
+    if src == dst:
+        return text
+    key = (text, src, dst)
+    cached = _TR_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        response = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": src, "tl": dst, "dt": "t", "q": text},
+            timeout=12,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        translated = "".join(part[0] for part in (payload[0] or []) if isinstance(part, list) and part)
+        translated = _compact_text(translated, fallback=text)
+    except Exception:
+        translated = text
+
+    _TR_CACHE[key] = translated
+    return translated
+
+
+def _convert_price(amount: float, from_currency: str, to_currency: str) -> float:
+    if amount <= 0:
+        return 0.0
+    rate = _get_exchange_rate(from_currency=from_currency, to_currency=to_currency)
+    return round(amount * rate, 2)
+
+
+def _compute_shipping(country: str, price_amount: float, currency: str, title: str) -> str:
+    profile = COUNTRY_PROFILES[country]
+    shipping_country = profile["shipping_country"]
+    if country in {"de", "at", "ch"}:
+        return f"{shipping_country}:::0.00 {currency}"
+
+    # UK shipping rules
+    if price_amount <= 200:
+        shipping_cost = 120.0
+    elif price_amount <= 1500:
+        shipping_cost = 350.0
+    else:
+        shipping_cost = 500.0
+
+    if "sauna" in str(title or "").lower():
+        shipping_cost += 2000.0
+
+    return f"{shipping_country}:::{shipping_cost:.2f} {currency}"
 
 
 def _split_image_urls(raw_value: Any) -> List[str]:
@@ -389,7 +498,8 @@ def _build_description_from_specs(normalized: Dict[str, str], title: str, specs:
     return _compact_text(" | ".join(parts), fallback=title)
 
 
-def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
+def _normalize_row(row: Dict[str, Any], fallback_id: str, country: str) -> Dict[str, str]:
+    profile = COUNTRY_PROFILES[country]
     normalized = {_normalize_key(k): _normalize_value(v) for k, v in row.items() if k is not None}
 
     title = normalized.get("artikelbeschreibung") or normalized.get("title") or normalized.get("name")
@@ -407,9 +517,12 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     price_amount = uvp_amount if uvp_amount > amount else amount
     sale_amount = amount if uvp_amount > amount else 0.0
 
-    currency = _resolve_currency(normalized.get("currency"))
-    price = f"{price_amount:.2f} {currency}"
-    sale_price = f"{sale_amount:.2f} {currency}" if sale_amount > 0 else ""
+    source_currency = _resolve_currency(normalized.get("currency")) or "EUR"
+    target_currency = profile["currency"]
+    price_amount = _convert_price(price_amount, source_currency, target_currency)
+    sale_amount = _convert_price(sale_amount, source_currency, target_currency) if sale_amount > 0 else 0.0
+    price = f"{price_amount:.2f} {target_currency}"
+    sale_price = f"{sale_amount:.2f} {target_currency}" if sale_amount > 0 else ""
 
     gtin = _extract_gtin_like(normalized)
     if not gtin:
@@ -481,12 +594,19 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     video_url = normalized.get("video[0].url") or normalized.get("videourl") or normalized.get("video_url") or ""
     video_tag = normalized.get("video[0].tag[0]") or normalized.get("videotag") or ""
     second_tag = normalized.get("category2id") or normalized.get("shopcat2") or normalized.get("kollektion") or ""
-    shipping_cost = _to_decimal(normalized.get("ship_shippinghandlingcosts") or normalized.get("ship_shippingrate"))
-    shipping = ""
-    if shipping_cost > 0:
-        shipping = f"DE:::{shipping_cost:.2f} {currency}"
-    elif _is_truthy(normalized.get("ship_sellerpays")):
-        shipping = f"DE:::0.00 {currency}"
+    if country == "uk":
+        title = _translate_text(title, source_lang="de", target_lang="en")
+        description = _translate_text(description, source_lang="de", target_lang="en")
+        brand = _translate_text(brand, source_lang="de", target_lang="en")
+        color = _translate_text(color, source_lang="de", target_lang="en")
+        size = _translate_text(size, source_lang="de", target_lang="en")
+        material = _translate_text(material, source_lang="de", target_lang="en")
+        pattern = _translate_text(pattern, source_lang="de", target_lang="en")
+        style = _translate_text(style, source_lang="de", target_lang="en")
+        google_product_category = _translate_text(google_product_category, source_lang="de", target_lang="en")
+        fb_product_category = _translate_text(fb_product_category, source_lang="de", target_lang="en")
+
+    shipping = _compute_shipping(country=country, price_amount=price_amount, currency=target_currency, title=title)
     quantity_to_sell = str(quantity) if quantity > 0 else ""
 
     return {
@@ -496,7 +616,7 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
         "availability": availability,
         "condition": "new",
         "price": price,
-        "link": _build_product_link(title=title, fallback_id=product_id),
+        "link": _build_product_link(title=title, fallback_id=product_id, base=profile["domain"]),
         "image_link": image_link,
         "additional_image_link": additional_image_link,
         "brand": brand,
@@ -523,7 +643,7 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
     }
 
 
-def _parse_csv_file(path: Path) -> List[Dict[str, str]]:
+def _parse_csv_file(path: Path, country: str) -> List[Dict[str, str]]:
     source_text = _repair_source_text(_read_text_with_fallback(path))
     reader = csv.DictReader(io.StringIO(source_text), delimiter=";", quotechar='"')
 
@@ -537,7 +657,7 @@ def _parse_csv_file(path: Path) -> List[Dict[str, str]]:
         if not any(_normalize_value(v) for v in row.values()):
             continue
         fallback_id = f"{path.stem}-{index}"
-        rows.append(_normalize_row(row, fallback_id=fallback_id))
+        rows.append(_normalize_row(row, fallback_id=fallback_id, country=country))
     return rows
 
 
@@ -569,10 +689,12 @@ def _build_feed_csv(rows: Iterable[Dict[str, str]]) -> str:
 @router.get("/catalog.csv")
 def facebook_catalog_feed(
     account: str | None = Query(default=None),
+    country: str = Query(default="de"),
     token: str | None = Query(default=None),
     source_file: str | None = Query(default=None),
 ) -> Response:
     account_mode = _account_mode(account)
+    country_mode = _resolve_country(country)
 
     expected_token = (settings.FACEBOOK_FEED_TOKEN or "").strip()
     if expected_token and token != expected_token:
@@ -586,7 +708,7 @@ def facebook_catalog_feed(
 
     all_rows: List[Dict[str, str]] = []
     for file in files:
-        all_rows.extend(_parse_csv_file(file))
+        all_rows.extend(_parse_csv_file(file, country=country_mode))
 
     if not all_rows:
         raise HTTPException(status_code=404, detail="No valid rows found in CSV files")
