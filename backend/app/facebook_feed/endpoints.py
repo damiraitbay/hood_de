@@ -294,8 +294,9 @@ def _convert_price(amount: float, from_currency: str, to_currency: str) -> float
 
 
 def _compute_shipping(country: str, price_amount: float, currency: str, title: str) -> str:
+    shipping_country = COUNTRY_PROFILES[country]["shipping_country"]
     if country in {"de", "at", "ch"}:
-        return f"0.00 {currency}"
+        return f"{shipping_country}:::0.00 {currency}"
 
     # UK shipping rules
     if price_amount <= 200:
@@ -308,7 +309,7 @@ def _compute_shipping(country: str, price_amount: float, currency: str, title: s
     if "sauna" in str(title or "").lower():
         shipping_cost += 2000.0
 
-    return f"{shipping_cost:.2f} {currency}"
+    return f"{shipping_country}:::{shipping_cost:.2f} {currency}"
 
 
 def _split_image_urls(raw_value: Any) -> List[str]:
