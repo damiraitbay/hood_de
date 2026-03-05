@@ -3,7 +3,6 @@ import io
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
-from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -189,11 +188,20 @@ def _resolve_currency(raw_currency: Any) -> str:
     return CURRENCY_MAP.get(currency, settings.FACEBOOK_DEFAULT_CURRENCY)
 
 
-def _build_product_link(product_id: str) -> str:
+def _build_product_link(title: str, fallback_id: str = "") -> str:
     base = (settings.FACEBOOK_PRODUCT_LINK_BASE or "").strip()
     if not base:
         return ""
-    return f"{base.rstrip('/')}/{quote(product_id)}"
+
+    raw_title = _compact_text(title)
+    # Keep SEO-like product slug from title: words joined by '+' and '.htm' suffix.
+    slug_source = re.sub(r"[^\w\s\-ÄÖÜäöüß]", "", raw_title, flags=re.UNICODE)
+    slug = re.sub(r"\s+", "+", slug_source).strip("+")
+    if not slug:
+        slug = re.sub(r"\s+", "+", _compact_text(fallback_id)).strip("+")
+    if not slug:
+        return base.rstrip("/")
+    return f"{base.rstrip('/')}/{slug}.htm"
 
 
 def _split_image_urls(raw_value: Any) -> List[str]:
@@ -488,7 +496,7 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str) -> Dict[str, str]:
         "availability": availability,
         "condition": "new",
         "price": price,
-        "link": _build_product_link(product_id),
+        "link": _build_product_link(title=title, fallback_id=product_id),
         "image_link": image_link,
         "additional_image_link": additional_image_link,
         "brand": brand,
