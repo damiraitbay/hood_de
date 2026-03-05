@@ -68,11 +68,11 @@ def split_uploaded_items(
     account: str | None = None,
     json_folder: str | None = None,
     progress_cb: Callable[[Dict[str, Any]], None] | None = None,
-) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]], str]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], str]:
     cfg = ApiConfig.from_env(account=account)
     workers = max(1, min(int(os.environ.get("HOOD_UPLOADED_SPLIT_WORKERS", "8")), 32))
     local_items = load_all_items(json_folder=json_folder)
-    uploaded: List[str] = []
+    uploaded: List[Dict[str, Any]] = []
     not_uploaded: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
 
@@ -139,7 +139,7 @@ def split_uploaded_items(
                 )
 
             if exists:
-                uploaded.append(item_number)
+                uploaded.append(_raw_with_factory(raw, item_number=item_number))
             else:
                 not_uploaded.append(_raw_with_factory(raw, item_number=item_number))
 

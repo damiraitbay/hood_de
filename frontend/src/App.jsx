@@ -28,6 +28,7 @@ export default function App() {
   const [lastActionAt, setLastActionAt] = useState(null);
   const [activeUpdateJobId, setActiveUpdateJobId] = useState("");
   const [connectionOk, setConnectionOk] = useState(false);
+  const [uploadedSplitLists, setUploadedSplitLists] = useState({ uploaded: [], notUploaded: [] });
   const updatePollTimerRef = useRef(null);
   const [status, setStatus] = useState({
     type: "idle",
@@ -75,6 +76,50 @@ export default function App() {
       clearInterval(updatePollTimerRef.current);
       updatePollTimerRef.current = null;
     }
+  }
+
+  function toSplitListItem(rawItem) {
+    if (!rawItem || typeof rawItem !== "object") {
+      return {
+        id: "-",
+        itemNumber: String(rawItem || "-"),
+        title: "Item",
+        factory: "-",
+      };
+    }
+    const id = String(rawItem.ID ?? rawItem.id ?? "").trim() || "-";
+    const itemNumber =
+      String(
+        rawItem.checked_item_number ??
+        rawItem.item_number ??
+        rawItem.ItemNumber ??
+        rawItem.EAN ??
+        rawItem.ean ??
+        ""
+      ).trim() || "-";
+    const title = getItemTitle(rawItem) || "Item";
+    const factory = String(rawItem.factory ?? rawItem.__source_name__ ?? "").trim() || "-";
+    return { id, itemNumber, title, factory };
+  }
+
+  function buildSplitListsFromResult(result) {
+    const uploadedRaw = Array.isArray(result?.uploaded) ? result.uploaded : [];
+    const notUploadedRaw = Array.isArray(result?.not_uploaded) ? result.not_uploaded : [];
+    return {
+      uploaded: uploadedRaw.map(toSplitListItem),
+      notUploaded: notUploadedRaw.map(toSplitListItem),
+    };
+  }
+
+  function renderSplitList(items, label) {
+    if (!Array.isArray(items) || items.length === 0) {
+      return `${label}: no items`;
+    }
+    const lines = items.map(
+      (item, idx) =>
+        `${idx + 1}. ${item.title} | factory: ${item.factory} | itemNumber: ${item.itemNumber} | id: ${item.id}`
+    );
+    return `${label}: ${items.length}\n\n${lines.join("\n")}`;
   }
 
   async function pollUpdateJob(jobId) {
@@ -340,6 +385,7 @@ export default function App() {
       if (statusValue === "completed") {
         const partial = Boolean(data?.result?.partial);
         const warningsCount = Array.isArray(data?.result?.warnings) ? data.result.warnings.length : 0;
+        setUploadedSplitLists(buildSplitListsFromResult(data?.result || {}));
         setUiStatus(
           "success",
           "Uploaded split",
@@ -753,6 +799,7 @@ export default function App() {
     setLoading(true);
     setRawOutput("");
     setProcessLogs([]);
+    setUploadedSplitLists({ uploaded: [], notUploaded: [] });
     pushProcessLog("uploaded_split_async", "starting job");
     setUiStatus("loading", "Uploaded split", "Starting async split...");
     try {
@@ -805,6 +852,20 @@ export default function App() {
     await call("POST", withAccount(endpoints.deleteByItemNumberBulk), `Delete (${itemNumbers.length})`, {
       item_numbers: itemNumbers,
     });
+  }
+
+  function showUploadedItemsList() {
+    const items = uploadedSplitLists.uploaded || [];
+    setRawOutput(renderSplitList(items, "Uploaded items"));
+    setLastActionAt(Date.now());
+    setUiStatus("success", "Uploaded items", `Items: ${items.length}`);
+  }
+
+  function showNotUploadedItemsList() {
+    const items = uploadedSplitLists.notUploaded || [];
+    setRawOutput(renderSplitList(items, "Not uploaded items"));
+    setLastActionAt(Date.now());
+    setUiStatus("success", "Not uploaded items", `Items: ${items.length}`);
   }
 
   async function deleteAllInHood() {
@@ -1120,6 +1181,12 @@ export default function App() {
               </button>
               <button className="btn" disabled={loading} onClick={loadUploadedSplit}>
                 Show uploaded/not uploaded
+              </button>
+              <button className="btn" disabled={loading || !(uploadedSplitLists.uploaded || []).length} onClick={showUploadedItemsList}>
+                List of uploaded items ({(uploadedSplitLists.uploaded || []).length})
+              </button>
+              <button className="btn" disabled={loading || !(uploadedSplitLists.notUploaded || []).length} onClick={showNotUploadedItemsList}>
+                List of not uploaded items ({(uploadedSplitLists.notUploaded || []).length})
               </button>
             </div>
           </section>
