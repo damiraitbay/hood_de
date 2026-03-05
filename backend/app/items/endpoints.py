@@ -46,7 +46,7 @@ from app.items.storage import (
     load_all_items,
     load_items_from_source_file,
 )
-from app.items.crud import split_uploaded_items
+from app.items.crud import check_selected_source_files, split_uploaded_items
 from app.items.utils import normalize_item
 
 router = APIRouter()
@@ -1593,6 +1593,33 @@ def items_uploaded_split(account: str | None = Query(default=None)) -> Dict[str,
         "not_uploaded_count": len(not_uploaded),
         "uploaded": uploaded,
         "not_uploaded": not_uploaded,
+    }
+
+
+@router.post("/check_selected_files")
+def check_selected_files(
+    source_files: List[str] = Body(..., embed=True),
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    account_mode = _account_mode(account)
+    json_folder = get_json_folder_for_account(account_mode)
+    try:
+        result = check_selected_source_files(
+            source_files=source_files,
+            account=account_mode,
+            json_folder=json_folder,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return {
+        "account": account_mode,
+        "json_folder": json_folder,
+        **result,
     }
 
 

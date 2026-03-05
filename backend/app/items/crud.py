@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Tuple
 
 from app.config import settings
-from app.items.storage import load_all_items
+from app.items.storage import load_all_items, load_items_from_source_file
 from app.items.utils import normalize_item
 from app.logger import get_logger
 from hood_api.api.parsers import parse_item_detail_response
@@ -188,4 +188,137 @@ def split_uploaded_items(
         )
 
     return uploaded, not_uploaded, warnings, not_uploaded_path
+
+
+def check_selected_source_files(
+    source_files: List[str],
+    account: str | None = None,
+    json_folder: str | None = None,
+    progress_cb: Callable[[Dict[str, Any]], None] | None = None,
+) -> Dict[str, Any]:
+    cfg = ApiConfig.from_env(account=account)
+    workers = max(1, min(int(os.environ.get("HOOD_CHECK_SELECTED_FILES_WORKERS", "8")), 32))
+
+    normalized_files: List[str] = []
+    seen: set[str] = set()
+    for raw in source_files:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        normalized_files.append(name)
+        seen.add(name)
+    if not normalized_files:
+        raise ValueError("source_files is empty")
+
+    files_total = len(normalized_files)
+    files_done = 0
+    total_uploaded = 0
+    total_not_uploaded = 0
+    total_missing_number = 0
+    total_processed_items = 0
+    files: List[Dict[str, Any]] = []
+
+    for source_file in normalized_files:
+        file_items = load_items_from_source_file(source_file, json_folder=json_folder)
+        file_uploaded = 0
+        file_not_uploaded = 0
+        file_missing_number = 0
+        missing_items: List[Dict[str, Any]] = []
+        futures_map: Dict[Any, Dict[str, Any]] = {}
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for raw in file_items:
+                norm = normalize_item(raw)
+                item_number = _normalize_item_number(norm.get("item_number") or norm.get("ean"))
+                if not item_number:
+                    file_missing_number += 1
+                    missing_items.append(
+                        {
+                            "id": str(raw.get("ID") or raw.get("id") or "").strip() or None,
+                            "item_number": None,
+                            "factory": str(raw.get("__source_name__") or source_file),
+                            "reason": "missing_item_number",
+                        }
+                    )
+                    continue
+                future = executor.submit(_exists_in_hood_by_item_detail, item_number, cfg)
+                futures_map[future] = {"item_number": item_number, "raw": raw}
+
+            for future in as_completed(futures_map):
+                ctx = futures_map[future]
+                raw = ctx["raw"]
+                item_number = str(ctx["item_number"])
+                try:
+                    exists, err = future.result()
+                except Exception as exc:
+                    exists, err = False, f"worker_error: {exc}"
+                if exists:
+                    file_uploaded += 1
+                else:
+                    file_not_uploaded += 1
+                    missing_items.append(
+                        {
+                            "id": str(raw.get("ID") or raw.get("id") or "").strip() or None,
+                            "item_number": item_number,
+                            "factory": str(raw.get("__source_name__") or source_file),
+                            "reason": err or "not_found_in_hood",
+                        }
+                    )
+
+        file_checkable = len(file_items) - file_missing_number
+        files_done += 1
+        total_uploaded += file_uploaded
+        total_not_uploaded += file_not_uploaded
+        total_missing_number += file_missing_number
+        total_processed_items += len(file_items)
+
+        files.append(
+            {
+                "source_file": source_file,
+                "total_items": len(file_items),
+                "checkable_items": file_checkable,
+                "uploaded_items": file_uploaded,
+                "not_uploaded_items": file_not_uploaded,
+                "missing_item_number": file_missing_number,
+                "has_any_in_hood": file_uploaded > 0,
+                "fully_uploaded": file_checkable > 0 and file_not_uploaded == 0,
+                "missing_items": missing_items,
+            }
+        )
+
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "phase": "checking_files",
+                    "files_total": files_total,
+                    "files_done": files_done,
+                    "processed_items": total_processed_items,
+                    "uploaded_items": total_uploaded,
+                    "not_uploaded_items": total_not_uploaded,
+                    "missing_item_number": total_missing_number,
+                }
+            )
+
+    if progress_cb is not None:
+        progress_cb(
+            {
+                "phase": "completed",
+                "files_total": files_total,
+                "files_done": files_done,
+                "processed_items": total_processed_items,
+                "uploaded_items": total_uploaded,
+                "not_uploaded_items": total_not_uploaded,
+                "missing_item_number": total_missing_number,
+            }
+        )
+
+    return {
+        "files_total": files_total,
+        "files_done": files_done,
+        "processed_items": total_processed_items,
+        "uploaded_items": total_uploaded,
+        "not_uploaded_items": total_not_uploaded,
+        "missing_item_number": total_missing_number,
+        "files": files,
+    }
 

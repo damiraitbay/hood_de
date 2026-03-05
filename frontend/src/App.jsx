@@ -731,6 +731,19 @@ export default function App() {
     await call("POST", url, "Upload all from JSON folder");
   }
 
+  async function checkSelectedFilesInHood() {
+    if (!sourceFilesMulti.length) {
+      setUiStatus("error", "Check selected files", "Select one or more source files first.");
+      return;
+    }
+    await call(
+      "POST",
+      withAccount(endpoints.checkSelectedFiles),
+      `Check selected files (${sourceFilesMulti.length})`,
+      { source_files: sourceFilesMulti }
+    );
+  }
+
   async function loadFailedItems() {
     await call("GET", withAccount(endpoints.status), "Failed items list");
   }
@@ -1092,6 +1105,9 @@ export default function App() {
               </button>
               <button className="btn warning" disabled={loading || !sourceFilesMulti.length} onClick={uploadSelectedFiles}>
                 Upload selected files ({sourceFilesMulti.length})
+              </button>
+              <button className="btn" disabled={loading || !sourceFilesMulti.length} onClick={checkSelectedFilesInHood}>
+                Check selected files ({sourceFilesMulti.length})
               </button>
               <button className="btn warning" disabled={loading || !sourceFile} onClick={updateAllFromSelectedFile}>
                 Update all from selected file

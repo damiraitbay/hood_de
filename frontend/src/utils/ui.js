@@ -58,6 +58,7 @@ export function buildEndpoints(apiBase) {
     uploadedSplitAsync: `${base}/items/uploaded_split_async`,
     json: `${base}/items/json`,
     jsonFiles: `${base}/items/json/files`,
+    checkSelectedFiles: `${base}/items/check_selected_files`,
     validateOne: `${base}/items/validate_one/`,
     uploadOneBulk: `${base}/items/upload_one`,
     updateOneBulk: `${base}/items/update_one`,
