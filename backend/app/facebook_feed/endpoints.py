@@ -4,6 +4,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
+from urllib.parse import quote
 
 import requests
 from fastapi import APIRouter, HTTPException, Query
@@ -214,7 +215,8 @@ def _build_product_link(title: str, fallback_id: str = "", base: str = "") -> st
         slug = re.sub(r"\s+", "+", _compact_text(fallback_id)).strip("+")
     if not slug:
         return base.rstrip("/")
-    return f"{base.rstrip('/')}/{slug}.htm"
+    encoded_slug = quote(slug, safe="+-._~")
+    return f"{base.rstrip('/')}/{encoded_slug}.htm"
 
 
 def _resolve_country(country: str | None) -> str:
