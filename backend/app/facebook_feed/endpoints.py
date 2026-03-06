@@ -1,10 +1,9 @@
-import csv
+﻿import csv
 import io
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
-from urllib.parse import quote
 
 import requests
 from fastapi import APIRouter, HTTPException, Query
@@ -208,16 +207,28 @@ def _build_product_link(title: str, fallback_id: str = "", base: str = "") -> st
         return ""
 
     raw_title = _compact_text(title)
+    transliteration_map = str.maketrans(
+        {
+            "Ä": "Ae",
+            "Ö": "Oe",
+            "Ü": "Ue",
+            "ä": "ae",
+            "ö": "oe",
+            "ü": "ue",
+            "ß": "ss",
+        }
+    )
+    raw_title = raw_title.translate(transliteration_map)
+
     # Keep SEO-like product slug from title: words joined by '+' and '.htm' suffix.
-    slug_source = re.sub(r"[^\w\s\-ÄÖÜäöüß]", "", raw_title, flags=re.UNICODE)
+    slug_source = re.sub(r"[^\w\s\-]", "", raw_title, flags=re.UNICODE)
     slug = re.sub(r"\s+", "+", slug_source).strip("+")
     if not slug:
-        slug = re.sub(r"\s+", "+", _compact_text(fallback_id)).strip("+")
+        fallback = _compact_text(fallback_id).translate(transliteration_map)
+        slug = re.sub(r"\s+", "+", fallback).strip("+")
     if not slug:
         return base.rstrip("/")
-    encoded_slug = quote(slug, safe="+-._~")
-    return f"{base.rstrip('/')}/{encoded_slug}.htm"
-
+    return f"{base.rstrip('/')}/{slug}.htm"
 
 def _resolve_country(country: str | None) -> str:
     raw = str(country or "de").strip().lower()
@@ -469,8 +480,8 @@ def _build_description_from_specs(normalized: Dict[str, str], title: str, specs:
         "zimmer",
         "stil",
         "breite",
-        "länge",
-        "höhe",
+        "lГ¤nge",
+        "hГ¶he",
         "ean",
     ]
 
@@ -564,9 +575,9 @@ def _normalize_row(row: Dict[str, Any], fallback_id: str, country: str) -> Dict[
     color = normalized.get("farbe") or normalized.get("color") or _spec_value(specs_index, ("farbe", "color"))
     size = (
         normalized.get("groesse")
-        or normalized.get("größe")
+        or normalized.get("grГ¶Гџe")
         or normalized.get("size")
-        or _spec_value(specs_index, ("groesse", "größe", "size", "liegeflaeche", "liegefläche"))
+        or _spec_value(specs_index, ("groesse", "grГ¶Гџe", "size", "liegeflaeche", "liegeflГ¤che"))
     )
     material = normalized.get("material") or _spec_value(specs_index, ("material",))
     pattern = normalized.get("muster") or normalized.get("pattern") or _spec_value(specs_index, ("muster", "pattern"))
