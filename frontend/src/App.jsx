@@ -122,8 +122,8 @@ export default function App() {
     return `${label}: ${items.length}\n\n${lines.join("\n")}`;
   }
 
-  async function pollUpdateJob(jobId) {
-    const url = withAccount(`${endpoints.updateAsync}/${encodeURIComponent(jobId)}`);
+  async function pollUpdateJob(jobId, statusBase = endpoints.updateAsync, label = "Async update", processName = "update_async") {
+    const url = withAccount(`${statusBase}/${encodeURIComponent(jobId)}`);
     try {
       const res = await fetch(url);
       const text = await res.text();
@@ -133,7 +133,7 @@ export default function App() {
       setLastActionAt(Date.now());
 
       if (!res.ok) {
-        setUiStatus("error", "Async update", `Status check failed: HTTP ${res.status}`);
+        setUiStatus("error", label, `Status check failed: HTTP ${res.status}`);
         stopUpdatePolling();
         return;
       }
@@ -141,20 +141,20 @@ export default function App() {
       const statusValue = String(data?.status || "");
       const progress = data?.progress || {};
       const processedItems = Number(progress?.processed_items || 0);
-      const totalItems = Number(progress?.total_items || data?.result?.prepared || 0);
+      const totalItems = Number(progress?.total_items || progress?.prepared || data?.result?.prepared || 0);
       const updatedItems = Number(progress?.updated || data?.result?.updated || 0);
       const failedItems = Number(progress?.failed || data?.result?.failed || 0);
       const phase = String(progress?.phase || "");
-      pushProcessLog("update_async", `status=${statusValue || "-"} phase=${phase || "-"}`);
+      pushProcessLog(processName, `status=${statusValue || "-"} phase=${phase || "-"}`);
 
       if (statusValue === "queued") {
-        setUiStatus("loading", "Async update", `Queued. Job: ${jobId}`);
+        setUiStatus("loading", label, `Queued. Job: ${jobId}`);
         return;
       }
       if (statusValue === "running") {
         setUiStatus(
           "loading",
-          "Async update",
+          label,
           `Running: ${processedItems}/${totalItems} processed, updated ${updatedItems}, failed ${failedItems}${phase ? ` (${phase})` : ""}`
         );
         return;
@@ -162,18 +162,18 @@ export default function App() {
       if (statusValue === "completed") {
         setUiStatus(
           "success",
-          "Async update",
+          label,
           `Completed: updated ${updatedItems}, failed ${failedItems}, processed ${processedItems}/${totalItems}`
         );
         stopUpdatePolling();
         return;
       }
       if (statusValue === "failed") {
-        setUiStatus("error", "Async update", `Failed: ${data?.error || "unknown error"}`);
+        setUiStatus("error", label, `Failed: ${data?.error || "unknown error"}`);
         stopUpdatePolling();
       }
     } catch (e) {
-      setUiStatus("error", "Async update", String(e));
+      setUiStatus("error", label, String(e));
       stopUpdatePolling();
     }
   }
@@ -729,7 +729,7 @@ export default function App() {
       return;
     }
     if (!window.confirm(`Update all items from selected file: ${sourceFile}?`)) return;
-    const url = withSource(`${endpoints.updateAsync}?limit=0`);
+    const url = withSource(`${endpoints.updateAsync}?limit=0&workers=3`);
     setLoading(true);
     setRawOutput("");
     setProcessLogs([]);
@@ -779,8 +779,46 @@ export default function App() {
 
   async function updateAllFromFolder() {
     if (!window.confirm("Update all items from JSON folder (all files)?")) return;
-    const url = withAccount(`${endpoints.updateAll}?limit=0`);
-    await call("POST", url, "Update all from JSON folder");
+    const url = withAccount(`${endpoints.updateAllAsync}?limit=0&workers=3`);
+    setLoading(true);
+    setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("update_all_async", "starting");
+    setUiStatus("loading", "Async update (all JSON files)", "Starting async update for all JSON files...");
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`POST ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", "Async update (all JSON files)", `HTTP ${res.status}. Open technical details below.`);
+        return;
+      }
+
+      const jobId = String(data?.job_id || "").trim();
+      if (!jobId) {
+        setUiStatus("error", "Async update (all JSON files)", "job_id is missing in response.");
+        return;
+      }
+      setActiveUpdateJobId(jobId);
+      stopUpdatePolling();
+      pushProcessLog("update_all_async", `queued job_id=${jobId}`);
+      setUiStatus("loading", "Async update (all JSON files)", `Queued. Job: ${jobId}`);
+      await pollUpdateJob(jobId, endpoints.updateAllAsync, "Async update (all JSON files)", "update_all_async");
+      updatePollTimerRef.current = setInterval(() => {
+        pollUpdateJob(jobId, endpoints.updateAllAsync, "Async update (all JSON files)", "update_all_async");
+      }, 2000);
+    } catch (e) {
+      setUiStatus("error", "Async update (all JSON files)", String(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function checkSelectedFilesInHood() {

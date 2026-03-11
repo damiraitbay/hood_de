@@ -782,6 +782,7 @@ def _run_items_update(
     limit: int,
     source_file: str | None,
     account: str | None,
+    workers: int = 1,
     progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     account_mode = _account_mode(account)
@@ -839,34 +840,96 @@ def _run_items_update(
                 "processed_items": 0,
                 "updated": 0,
                 "failed": failed,
+                "workers": workers,
             }
         )
 
-    for idx, chunk in enumerate(chunks, start=1):
-        chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
-        chunk_result = _send_update_chunk_with_duplicate_cleanup(chunk=chunk, cfg=cfg, cache=duplicate_cleanup_cache)
-        details.extend(chunk_result["details"])
-        updated += int(chunk_result["updated"])
-        failed += int(chunk_result["failed"])
-        last_detail = chunk_result["details"][-1] if chunk_result["details"] else {}
-
-        if progress_cb is not None:
-            progress_cb(
-                {
-                    "phase": "updating",
-                    "total_chunks": total_chunks,
-                    "processed_chunks": idx,
-                    "total_items": total_items,
-                    "processed_items": min(idx * 5, total_items),
-                    "updated": updated,
-                    "failed": failed,
-                    "last_chunk_item_numbers": chunk_ids,
-                    "last_chunk_success": bool(last_detail.get("success")),
-                    "last_chunk_status": last_detail.get("status"),
-                    "last_chunk_message": last_detail.get("message"),
-                    "last_chunk_errors": last_detail.get("errors") or [],
-                }
+    if workers <= 1 or total_chunks <= 1:
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
+            chunk_result = _send_update_chunk_with_duplicate_cleanup(
+                chunk=chunk,
+                cfg=cfg,
+                cache=duplicate_cleanup_cache,
             )
+            details.extend(chunk_result["details"])
+            updated += int(chunk_result["updated"])
+            failed += int(chunk_result["failed"])
+            last_detail = chunk_result["details"][-1] if chunk_result["details"] else {}
+
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "phase": "updating",
+                        "total_chunks": total_chunks,
+                        "processed_chunks": idx,
+                        "total_items": total_items,
+                        "processed_items": min(idx * 5, total_items),
+                        "updated": updated,
+                        "failed": failed,
+                        "workers": workers,
+                        "last_chunk_item_numbers": chunk_ids,
+                        "last_chunk_success": bool(last_detail.get("success")),
+                        "last_chunk_status": last_detail.get("status"),
+                        "last_chunk_message": last_detail.get("message"),
+                        "last_chunk_errors": last_detail.get("errors") or [],
+                    }
+                )
+    else:
+        # Parallel chunk updates to speed up long runs.
+        # NOTE: duplicate_cleanup_cache isn't thread-safe; each worker uses its own local cache.
+        progress_lock = threading.Lock()
+        processed_chunks = 0
+        processed_items = 0
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_meta: Dict[Any, Dict[str, Any]] = {}
+            for chunk in chunks:
+                chunk_ids = [str(x.get("item_number") or x.get("ean") or "") for x in chunk]
+                # Each worker gets its own cache to avoid cross-thread mutation.
+                future = executor.submit(
+                    _send_update_chunk_with_duplicate_cleanup,
+                    chunk,
+                    cfg,
+                    {},
+                )
+                future_meta[future] = {
+                    "chunk_ids": chunk_ids,
+                    "chunk_size": len(chunk),
+                }
+
+            for future in as_completed(list(future_meta.keys())):
+                meta = future_meta.get(future) or {}
+                chunk_ids = meta.get("chunk_ids") or []
+                chunk_size = int(meta.get("chunk_size") or 0)
+                chunk_result = future.result()
+                last_detail = chunk_result["details"][-1] if chunk_result.get("details") else {}
+
+                with progress_lock:
+                    details.extend(chunk_result.get("details") or [])
+                    updated += int(chunk_result.get("updated") or 0)
+                    failed += int(chunk_result.get("failed") or 0)
+                    processed_chunks += 1
+                    processed_items += chunk_size
+
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "phase": "updating",
+                            "total_chunks": total_chunks,
+                            "processed_chunks": processed_chunks,
+                            "total_items": total_items,
+                            "processed_items": min(processed_items, total_items),
+                            "updated": updated,
+                            "failed": failed,
+                            "workers": workers,
+                            "last_chunk_item_numbers": chunk_ids,
+                            "last_chunk_success": bool(last_detail.get("success")),
+                            "last_chunk_status": last_detail.get("status"),
+                            "last_chunk_message": last_detail.get("message"),
+                            "last_chunk_errors": last_detail.get("errors") or [],
+                        }
+                    )
 
     result = {
         "requested": len(norms),
@@ -875,6 +938,7 @@ def _run_items_update(
         "failed": failed,
         "account": account_mode,
         "source_file": source_file,
+        "workers": workers,
         "details": details,
         "skipped": skipped,
     }
@@ -1147,13 +1211,19 @@ def items_update(
     limit: int = 1,
     source_file: str | None = Query(default=None),
     account: str | None = Query(default=None),
+    workers: int = Query(default=1, ge=1, le=10),
 ) -> Dict[str, Any]:
     """
     Массовое обновление товаров из JSON в Hood через itemUpdate.
     limit=0 — обновить все товары из выбранного source_file (или из всей папки JSON).
     """
     try:
-        return _run_items_update(limit=limit, source_file=source_file, account=account)
+        return _run_items_update(
+            limit=limit,
+            source_file=source_file,
+            account=account,
+            workers=workers,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
@@ -1164,13 +1234,19 @@ def items_update(
 def items_update_all(
     limit: int = 1,
     account: str | None = Query(default=None),
+    workers: int = Query(default=1, ge=1, le=10),
 ) -> Dict[str, Any]:
     """
     Массовое обновление товаров из ВСЕХ JSON-файлов (как /items/upload, но через itemUpdate).
     limit=0 — обновить все товары из папки JSON.
     """
     try:
-        return _run_items_update(limit=limit, source_file=None, account=account)
+        return _run_items_update(
+            limit=limit,
+            source_file=None,
+            account=account,
+            workers=workers,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
@@ -1184,6 +1260,7 @@ def items_update_all_async(
     background_tasks: BackgroundTasks,
     limit: int = 1,
     account: str | None = Query(default=None),
+    workers: int = Query(default=1, ge=1, le=10),
 ) -> Dict[str, Any]:
     # Validate account early to fail fast on bad input.
     _account_mode(account)
@@ -1199,6 +1276,7 @@ def items_update_all_async(
             "source_file": None,
             "account": account,
             "kind": "update_all",
+            "workers": workers,
         },
     )
     background_tasks.add_task(_run_items_update_job, job_id, limit, None, account)
@@ -1226,7 +1304,16 @@ def _run_items_update_job(job_id: str, limit: int, source_file: str | None, acco
         _set_update_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
 
     try:
-        result = _run_items_update(limit=limit, source_file=source_file, account=account, progress_cb=progress_cb)
+        with UPDATE_JOBS_LOCK:
+            job_cfg = UPDATE_JOBS.get(job_id) or {}
+        workers = int(job_cfg.get("workers") or 1)
+        result = _run_items_update(
+            limit=limit,
+            source_file=source_file,
+            account=account,
+            workers=workers,
+            progress_cb=progress_cb,
+        )
     except Exception as exc:
         _set_update_job(
             job_id,
@@ -1262,6 +1349,7 @@ def items_update_async(
     limit: int = 1,
     source_file: str | None = Query(default=None),
     account: str | None = Query(default=None),
+    workers: int = Query(default=1, ge=1, le=10),
 ) -> Dict[str, Any]:
     # Validate account early to fail fast on bad input.
     _account_mode(account)
@@ -1276,6 +1364,7 @@ def items_update_async(
             "limit": limit,
             "source_file": source_file,
             "account": account,
+            "workers": workers,
         },
     )
     background_tasks.add_task(_run_items_update_job, job_id, limit, source_file, account)
