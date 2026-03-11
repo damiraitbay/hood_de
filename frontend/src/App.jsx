@@ -773,8 +773,46 @@ export default function App() {
 
   async function uploadAllFromFolder() {
     if (!window.confirm("Upload all items from JSON folder (all files)?")) return;
-    const url = withAccount(`${endpoints.upload}?limit=0`);
-    await call("POST", url, "Upload all from JSON folder");
+    const url = withAccount(`${endpoints.uploadAsync}?limit=0&workers=5`);
+    setLoading(true);
+    setRawOutput("");
+    setProcessLogs([]);
+    pushProcessLog("upload_async", "starting (all JSON files)");
+    setUiStatus("loading", "Async upload (all JSON files)", "Starting async upload for all JSON files...");
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const text = await res.text();
+      const data = parseResponseBody(text);
+      const body = typeof data === "string" ? data : pretty(data);
+      setRawOutput([`POST ${url}`, `HTTP ${res.status}`, "", body].join("\n"));
+      setLastActionAt(Date.now());
+
+      if (!res.ok) {
+        setUiStatus("error", "Async upload (all JSON files)", `HTTP ${res.status}. Open technical details below.`);
+        return;
+      }
+
+      const jobId = String(data?.job_id || "").trim();
+      if (!jobId) {
+        setUiStatus("error", "Async upload (all JSON files)", "job_id is missing in response.");
+        return;
+      }
+      setActiveUpdateJobId(jobId);
+      stopUpdatePolling();
+      pushProcessLog("upload_async", `queued job_id=${jobId}`);
+      setUiStatus("loading", "Async upload (all JSON files)", `Queued. Job: ${jobId}`);
+      await pollUploadJob(jobId);
+      updatePollTimerRef.current = setInterval(() => {
+        pollUploadJob(jobId);
+      }, 2000);
+    } catch (e) {
+      setUiStatus("error", "Async upload (all JSON files)", String(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function updateAllFromFolder() {

@@ -1397,7 +1397,18 @@ def _run_items_upload_job(job_id: str, limit: int, source_file: str | None, acco
         _set_upload_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
 
     try:
-        result = asyncio.run(_run_items_upload(limit=limit, source_file=source_file, account=account, progress_cb=progress_cb))
+        with UPLOAD_JOBS_LOCK:
+            job_cfg = UPLOAD_JOBS.get(job_id) or {}
+        workers = int(job_cfg.get("workers") or 0)
+        result = asyncio.run(
+            _run_items_upload(
+                limit=limit,
+                source_file=source_file,
+                account=account,
+                workers=workers,
+                progress_cb=progress_cb,
+            )
+        )
     except Exception as exc:
         _set_upload_job(
             job_id,
@@ -1431,6 +1442,7 @@ async def _run_items_upload_many(
     source_files: List[str],
     limit: int = 0,
     account: str | None = None,
+    workers: int = 0,
     progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     normalized_files: List[str] = []
@@ -1505,6 +1517,7 @@ async def _run_items_upload_many(
             limit=limit,
             source_file=source_file,
             account=account,
+            workers=workers,
             progress_cb=file_progress_cb,
         )
         file_success = sum(1 for r in file_result if r.get("success"))
@@ -1575,11 +1588,15 @@ def _run_items_upload_many_job(job_id: str, source_files: List[str], limit: int,
         _set_upload_job(job_id, {"progress": progress, "last_update_at": _utc_now_iso()})
 
     try:
+        with UPLOAD_JOBS_LOCK:
+            job_cfg = UPLOAD_JOBS.get(job_id) or {}
+        workers = int(job_cfg.get("workers") or 0)
         result = asyncio.run(
             _run_items_upload_many(
                 source_files=source_files,
                 limit=limit,
                 account=account,
+                workers=workers,
                 progress_cb=progress_cb,
             )
         )
@@ -1618,6 +1635,7 @@ def items_upload_async(
     limit: int = 1,
     source_file: str | None = Query(default=None),
     account: str | None = Query(default=None),
+    workers: int = Query(default=0, ge=0, le=50),
 ) -> Dict[str, Any]:
     _account_mode(account)
     job_id = uuid4().hex
@@ -1630,6 +1648,7 @@ def items_upload_async(
             "limit": limit,
             "source_file": source_file,
             "account": account,
+            "workers": workers,
         },
     )
     background_tasks.add_task(_run_items_upload_job, job_id, limit, source_file, account)
@@ -1646,6 +1665,7 @@ def items_upload_many_async(
     source_files: List[str] = Body(..., embed=True),
     limit: int = 0,
     account: str | None = Query(default=None),
+    workers: int = Query(default=0, ge=0, le=50),
 ) -> Dict[str, Any]:
     _account_mode(account)
     normalized_files: List[str] = []
@@ -1670,6 +1690,7 @@ def items_upload_many_async(
             "source_files": normalized_files,
             "account": account,
             "mode": "many_files",
+            "workers": workers,
         },
     )
     background_tasks.add_task(_run_items_upload_many_job, job_id, normalized_files, limit, account)
@@ -1915,6 +1936,7 @@ async def _run_items_upload(
     limit: int = 1,
     source_file: str | None = None,
     account: str | None = None,
+    workers: int = 0,
     progress_cb: Callable[[Dict[str, Any]], None] | None = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -1946,7 +1968,11 @@ async def _run_items_upload(
         to_upload = all_norms[:limit]
         logger.info(f"Start upload {len(to_upload)} items to Hood (limit={limit})")
 
-    semaphore = asyncio.Semaphore(getattr(settings, "MAX_PARALLEL_UPLOADS", 5))
+    max_parallel = int(workers or 0)
+    if max_parallel <= 0:
+        max_parallel = int(getattr(settings, "MAX_PARALLEL_UPLOADS", 5) or 5)
+    max_parallel = max(1, min(max_parallel, 50))
+    semaphore = asyncio.Semaphore(max_parallel)
     results: List[Dict[str, Any]] = []
     processed_count = 0
     total_count = len(to_upload)
@@ -1961,6 +1987,7 @@ async def _run_items_upload(
                 "processed_items": 0,
                 "success": 0,
                 "failed": 0,
+                "workers": max_parallel,
             }
         )
 
