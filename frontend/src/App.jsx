@@ -777,6 +777,12 @@ export default function App() {
     await call("POST", url, "Upload all from JSON folder");
   }
 
+  async function updateAllFromFolder() {
+    if (!window.confirm("Update all items from JSON folder (all files)?")) return;
+    const url = withAccount(`${endpoints.update}?limit=0`);
+    await call("POST", url, "Update all from JSON folder");
+  }
+
   async function checkSelectedFilesInHood() {
     if (!sourceFilesMulti.length) {
       setUiStatus("error", "Check selected files", "Select one or more source files first.");
@@ -1149,7 +1155,7 @@ export default function App() {
 
           <section id="actions" className="card">
             <h2 className="cardTitle">3) Actions</h2>
-            <p className="cardHint">Upload selected items, selected source file, or all JSON files.</p>
+            <p className="cardHint">Upload/update selected items, selected source file, or all JSON files.</p>
 
             <div className="row">
               <button className="btn" disabled={loading || !selectedIds.length} onClick={validateSelected}>
@@ -1175,6 +1181,9 @@ export default function App() {
               </button>
               <button className="btn warning" disabled={loading} onClick={uploadAllFromFolder}>
                 Upload all JSON files
+              </button>
+              <button className="btn warning" disabled={loading} onClick={updateAllFromFolder}>
+                Update all JSON files
               </button>
               <button className="btn" disabled={loading} onClick={loadFailedItems}>
                 Show failed items
