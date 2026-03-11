@@ -779,7 +779,7 @@ export default function App() {
 
   async function updateAllFromFolder() {
     if (!window.confirm("Update all items from JSON folder (all files)?")) return;
-    const url = withAccount(`${endpoints.update}?limit=0`);
+    const url = withAccount(`${endpoints.updateAll}?limit=0`);
     await call("POST", url, "Update all from JSON folder");
   }
 

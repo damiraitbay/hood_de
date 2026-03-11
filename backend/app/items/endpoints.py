@@ -1160,6 +1160,60 @@ def items_update(
         raise HTTPException(status_code=404, detail=f"JSON file not found: {source_file}")
 
 
+@router.post("/update_all")
+def items_update_all(
+    limit: int = 1,
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    """
+    Массовое обновление товаров из ВСЕХ JSON-файлов (как /items/upload, но через itemUpdate).
+    limit=0 — обновить все товары из папки JSON.
+    """
+    try:
+        return _run_items_update(limit=limit, source_file=None, account=account)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        # _run_items_update может кидать FileNotFoundError при source_file; здесь его нет,
+        # но оставляем на всякий случай для совместимости.
+        raise HTTPException(status_code=404, detail="JSON folder not found")
+
+
+@router.post("/update_all_async")
+def items_update_all_async(
+    background_tasks: BackgroundTasks,
+    limit: int = 1,
+    account: str | None = Query(default=None),
+) -> Dict[str, Any]:
+    # Validate account early to fail fast on bad input.
+    _account_mode(account)
+
+    job_id = uuid4().hex
+    _set_update_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "limit": limit,
+            "source_file": None,
+            "account": account,
+            "kind": "update_all",
+        },
+    )
+    background_tasks.add_task(_run_items_update_job, job_id, limit, None, account)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/api/items/update_all_async/{job_id}",
+    }
+
+
+@router.get("/update_all_async/{job_id}")
+def items_update_all_async_status(job_id: str) -> Dict[str, Any]:
+    return items_update_async_status(job_id)
+
+
 def _run_items_update_job(job_id: str, limit: int, source_file: str | None, account: str | None) -> None:
     _set_update_job(
         job_id,

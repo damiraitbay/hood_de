@@ -52,6 +52,8 @@ export function buildEndpoints(apiBase) {
     uploadManyAsync: `${base}/items/upload_many_async`,
     update: `${base}/items/update`,
     updateAsync: `${base}/items/update_async`,
+    updateAll: `${base}/items/update_all`,
+    updateAllAsync: `${base}/items/update_all_async`,
     deleteAsyncStatus: `${base}/items/delete_async`,
     status: `${base}/items/status`,
     uploadedSplit: `${base}/items/uploaded_split`,
